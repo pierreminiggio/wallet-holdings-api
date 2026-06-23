@@ -243,20 +243,32 @@ class RoutescanClient
             return self::ERROR_UPSTREAM;
         }
 
-        // Etherscan-style status "0" can mean several different things: a real client-side
-        // error (bad address), a legitimately empty result ("No transactions found", handled
-        // by the caller), or a transient server-side issue (generic "An error occurred",
-        // query timeouts) that's worth retrying rather than failing outright. Only the
-        // address case is identified here as definitively non-retryable; anything else
-        // with status "0" that isn't the empty-result message falls through to
-        // ERROR_UPSTREAM below, which the retry loop in request() will retry.
-        if (
-            isset($decoded['status'])
-            && $decoded['status'] === '0'
-            && isset($decoded['message'])
-            && str_contains(strtolower((string) $decoded['message']), 'invalid address')
-        ) {
-            return self::ERROR_INVALID_ADDRESS;
+        // Etherscan-style status "0" can mean several different things, and they need to
+        // be told apart here -- not downstream in getPaginated() -- because only errors
+        // returned as a string from this method actually go through request()'s retry loop.
+        // A previous version of this check only specifically recognized "invalid address"
+        // and let every other status "0" message (including transient ones) fall through
+        // as if it were a normal, successful, just-empty response. That meant a transient
+        // "An error occurred" response was never retried at all: it looked like a
+        // legitimate empty result by the time getPaginated() saw it, which doesn't retry.
+        if (isset($decoded['status']) && $decoded['status'] === '0') {
+            $message = strtolower((string) ($decoded['message'] ?? ''));
+
+            // A genuinely empty result for this address/range: not an error at all, and
+            // must be returned as a real (empty) array so getPaginated() can tell it apart
+            // from a transient failure and stop paginating cleanly.
+            if (str_contains($message, 'no transactions found')) {
+                return $decoded;
+            }
+
+            if (str_contains($message, 'invalid address')) {
+                return self::ERROR_INVALID_ADDRESS;
+            }
+
+            // Anything else with status "0" -- "An error occurred", "Invalid querystring
+            // request", "NOTOK", or any other message -- is treated as a transient
+            // upstream error and retried, rather than assumed to be a permanent failure.
+            return self::ERROR_UPSTREAM;
         }
 
         return $decoded;
