@@ -18,9 +18,11 @@ class WalletSyncService
      * date" requirement: a later request for an even later date will simply sync further
      * next time it's needed, rather than this call eagerly fetching "up to now".
      *
-     * @return true|string True on success, or one of RoutescanClient::ERROR_* on failure.
+     * @return string|null Null on success, or one of RoutescanClient::ERROR_* on failure.
+     *                       (Not a true|string union, since standalone "true" as a type
+     *                       requires PHP 8.2+ and this project targets PHP 8.0.)
      */
-    public function syncUpTo(string $address, string $network, int $untilTimestamp): true|string
+    public function syncUpTo(string $address, string $network, int $untilTimestamp): ?string
     {
         $chainId = Network::chainId($network);
         $syncState = $this->repository->getSyncState($address, $network);
@@ -28,7 +30,7 @@ class WalletSyncService
         if ($syncState !== null && $syncState['lastTimestamp'] >= $untilTimestamp) {
             // Already synced at least as far as the requested date; the cached events
             // are sufficient and no network call is needed.
-            return true;
+            return null;
         }
 
         $startBlock = $syncState['lastBlock'] ?? 0;
@@ -73,7 +75,7 @@ class WalletSyncService
         // caught up to $untilTimestamp even if no events happened to land exactly on it.
         $this->repository->setSyncState($address, $network, $newBlock, $newTimestamp);
 
-        return true;
+        return null;
     }
 
     /**
