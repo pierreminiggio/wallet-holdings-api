@@ -130,6 +130,25 @@ class HoldingsCalculator
         $normalizedAddress = strtolower($address);
         $events = [];
 
+        // Tracks how many events have already been seen for each tx_hash, used to build a
+        // stable per-transaction ordinal below. Etherscan-family tokentx responses do NOT
+        // reliably include a logIndex field (confirmed against real data: a multicall
+        // transaction with two separate incoming USDC transfers returned neither row with
+        // a logIndex key at all). Relying on a missing field defaulting to 0 caused two
+        // real, distinct transfers in the same transaction to collide on the same storage
+        // key, silently overwriting one with the other and corrupting the balance. The fix
+        // uses the order events are returned in for the same tx_hash instead, which
+        // Etherscan-compatible APIs are documented and observed to return in on-chain
+        // emission order.
+        $eventIndexByTxHash = [];
+
+        // Guards against the API returning the exact same transfer event twice in one
+        // response (a real, confirmed category of bug on this API family -- see e.g.
+        // https://routescan-bugs.nolt.io/359 for a different but related data-quality
+        // issue). Without this, a duplicated row would be silently counted as two real
+        // transfers instead of one.
+        $seenSignatures = [];
+
         foreach ($tokenTransfers as $transfer) {
             $isSender = strtolower($transfer['from']) === $normalizedAddress;
             $isRecipient = strtolower($transfer['to'] ?? '') === $normalizedAddress;
@@ -138,22 +157,30 @@ class HoldingsCalculator
                 continue;
             }
 
+            $hash = $transfer['hash'];
+            $signature = $hash . '|' . strtolower($transfer['from']) . '|'
+                . strtolower($transfer['to'] ?? '') . '|' . $transfer['value']
+                . '|' . strtolower($transfer['contractAddress']);
+
+            if (isset($seenSignatures[$signature])) {
+                continue;
+            }
+
+            $seenSignatures[$signature] = true;
+
             $blockNumber = (int) $transfer['blockNumber'];
             $timestamp = (int) $transfer['timeStamp'];
-            $hash = $transfer['hash'];
             $contract = strtolower($transfer['contractAddress']);
             $symbol = $transfer['tokenSymbol'] ?? '???';
             $decimals = (int) ($transfer['tokenDecimal'] ?? 18);
-            // The real on-chain log index for this transfer event, as reported by the
-            // explorer; reliable and collision-free within a single tx_hash, unlike a
-            // synthetic counter. A self-transfer (isSender && isRecipient) needs two
-            // distinct rows for the same logIndex, so the outgoing row is offset.
-            $logIndex = (int) ($transfer['logIndex'] ?? 0);
+
+            $eventIndexByTxHash[$hash] = ($eventIndexByTxHash[$hash] ?? -1) + 1;
+            $eventIndex = $eventIndexByTxHash[$hash];
 
             if ($isRecipient) {
                 $events[] = [
                     'txHash' => $hash,
-                    'logIndex' => $logIndex * 2,
+                    'logIndex' => $eventIndex * 2,
                     'blockNumber' => $blockNumber,
                     'timestamp' => $timestamp,
                     'tokenContract' => $contract,
@@ -166,7 +193,7 @@ class HoldingsCalculator
             if ($isSender) {
                 $events[] = [
                     'txHash' => $hash,
-                    'logIndex' => $logIndex * 2 + 1,
+                    'logIndex' => $eventIndex * 2 + 1,
                     'blockNumber' => $blockNumber,
                     'timestamp' => $timestamp,
                     'tokenContract' => $contract,
