@@ -1,11 +1,13 @@
 # wallet-holdings-api
 
-Reconstructs what an EVM wallet held — native coin and ERC-20/BEP-20 tokens — on a given date,
-across Ethereum, Polygon and BNB Smart Chain.
+Reconstructs what an EVM wallet held — native coin and ERC-20/BEP-20 tokens — on a given date.
 
-**Base support is temporarily disabled** — see "Why Base is currently disabled" below — but the
-architecture is network-agnostic (driven entirely by `Network::ALL`), so adding it back later is
-a small, contained change once a working free data source for it is wired in.
+**Currently only Ethereum is active.** The architecture supports any EVM network and is fully
+network-agnostic (driven entirely by the `Network::ALL` array), but Polygon, BNB Smart Chain and
+Base were all found to either fail directly against the live Routescan API or were never actually
+confirmed to work — see "Why only Ethereum is active right now" below for what was checked and
+why each is disabled for the moment. Re-adding a network that's confirmed working is a one-line
+change.
 
 ## Why "reconstruct" instead of "look up"
 
@@ -42,16 +44,10 @@ GET /holdings/0x1234567890123456789012345678901234567890?date=2024-06-15
       "tokens": [
         { "symbol": "USDC", "contract": "0xa0b8...", "amount": "500" }
       ]
-    },
-    "polygon": { "native": { "symbol": "MATIC", "amount": "120.4" }, "tokens": [] },
-    "bnb": { "native": { "symbol": "BNB", "amount": "0.2" }, "tokens": [] }
+    }
   }
 }
 ```
-
-Note `polygon`'s native symbol is `MATIC` for dates before 2024-09-04 and `POL` after, reflecting
-Polygon's 1:1 token rebrand on that date — the underlying balance is continuous, only the label
-changes depending on which date is queried.
 
 ## How balances are calculated
 
@@ -80,26 +76,41 @@ would require a transaction with an enormous number of internal calls to ever ma
 this entirely would require widening the `log_index` column to a string, which wasn't done here
 to keep the schema aligned with the other event table.
 
-## Why Base is currently disabled
+## Why only Ethereum is active right now
 
-Routescan's free/keyless tier does not index Base — confirmed directly by the API itself, which
-returns `{"status":"0","message":"chain not supported"}` for chain ID 8453, despite some
-third-party reporting suggesting otherwise. Ethereum, Polygon, and BNB Smart Chain are all
-confirmed working (each verified directly against the live API, not just assumed from chain ID).
+* **Base**: confirmed *not* indexed by Routescan's free/keyless tier — the API itself directly
+  returns `{"status":"0","message":"chain not supported"}` for chain ID 8453. This contradicts
+  some third-party reporting that Routescan added free Base support; the live API's own answer
+  is the one that matters here.
+* **Polygon**: same result as Base — `"chain not supported"` returned directly by the live API
+  for chain ID 137, when actually tested. (An earlier version of this README claimed Polygon was
+  "confirmed working" based on finding a Routescan *web explorer* page for it; that was a mistake
+  — a human-facing explorer page existing is not the same as the free *API* tier serving that
+  chain, and this is exactly the kind of claim that needs testing against the live API directly
+  rather than inferred from a webpage. For when it's re-enabled: `Network::nativeSymbol()` already
+  handles Polygon's native coin being `MATIC` before its 2024-09-04 1:1 rebrand and `POL` after,
+  so that logic doesn't need to be redone.)
+* **BNB Smart Chain**: never actually tested against the live API at all in this project so far —
+  it was assumed to work based on the existence of a `56.routescan.io` subdomain, which has the
+  same problem as the Polygon mistake above: it's evidence a web explorer exists, not that the
+  keyless API tier serves it.
 
-Etherscan's own official V2 API does support Base, and would be the natural fix, but requires
-registering for a separate free API key (no credit card, but a distinct signup step and a new
-config value) rather than working keyless like Routescan does for the other three networks. That
-was out of scope for now.
+Only Ethereum (chain ID 1) has been confirmed by an actual successful response from the live
+Routescan API through this project's own client.
 
-To re-enable Base later:
+Etherscan's own official V2 API does support Base, and may support the others too, and would be
+the natural fix for any network Routescan doesn't serve — but it requires registering for a
+separate free API key (no credit card, but a distinct signup step and a new config value) rather
+than working keyless like Routescan does. That's out of scope for now.
 
-1. Add `self::BASE` back into `Network::ALL` in `src/Network.php`.
-2. Either confirm Routescan has since added free Base support (re-test the same `txlist` call
-   that currently returns `"chain not supported"`), or add a second client (e.g. an
-   `EtherscanClient` alongside `RoutescanClient`) and route Base's calls through it instead in
-   `WalletSyncService`.
-3. Restore the `base` entries removed from the OpenAPI spec in `App::renderOpenApiDoc()`.
+To re-enable any network later, the safest process is to test it directly first, rather than
+re-enable based on documentation or a web page:
+
+1. Hit `https://api.routescan.io/v2/network/mainnet/evm/{chainId}/etherscan/api?module=account&action=txlist&address={anyRealAddress}&page=1&offset=10` directly (browser or curl) and confirm it
+   returns real transaction data, not `"chain not supported"`.
+2. Only once that's confirmed, add the network back into `Network::ALL` in `src/Network.php`.
+3. Restore its entry in the OpenAPI spec in `App::renderOpenApiDoc()` (two places: the top-level
+   `info.description` and the `HoldingsResult` schema's `holdings.properties`).
 
 ## Setup
 
@@ -187,12 +198,12 @@ active wallet's first sync feels slow.
 
 ## A note on the Routescan keyless tier
 
-This API calls Routescan's keyless public tier (2 requests/second, 10,000 calls/day), chosen as a
-single Etherscan-compatible provider covering Ethereum, Polygon, and BNB for free (Etherscan itself
-has, at various points, restricted free access to some of these chains). Each active network needs
-up to 3 calls (normal tx, internal tx, token transfers) per sync, so a single never-before-seen
-wallet query can use up to 9 calls right now (would be up to 12 with Base re-enabled); cached/
-already-synced wallets use 0.
+This API calls Routescan's keyless public tier (2 requests/second, 10,000 calls/day) for Ethereum,
+the only network currently confirmed and active (Etherscan, the more well-known alternative, has
+at various points restricted free access to some chains too, which is part of why Routescan was
+tried here). Each active network needs up to 3 calls (normal tx, internal tx, token transfers) per
+sync, so a single never-before-seen wallet query currently uses up to 3 calls (would scale with
+each additional network confirmed and re-enabled); cached/already-synced wallets use 0.
 
 Any single data source (normal tx, internal tx, or token transfers) is capped by the upstream API
 at 10,000 records *per request*, regardless of pagination. If a wallet has more activity than that

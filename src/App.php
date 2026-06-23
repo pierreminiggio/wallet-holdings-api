@@ -242,13 +242,14 @@ class App
             'openapi' => '3.0.3',
             'info' => [
                 'title' => 'Wallet Holdings API',
-                'description' => 'Reconstructs what a wallet held, on a given date, across Ethereum, '
-                    . 'Polygon and BNB Smart Chain, by replaying its full transaction history rather than '
-                    . 'relying on a (paid-only) historical balance snapshot. Data is fetched from Routescan '
-                    . "(Etherscan-compatible, keyless tier) and cached, so repeat queries for already-synced\n"
-                    . 'ranges never re-hit the upstream source. (Base is temporarily disabled: Routescan\'s '
-                    . 'free tier does not index it. See Network::ALL to re-enable once a working free data '
-                    . 'source for Base is wired in.)',
+                'description' => 'Reconstructs what a wallet held, on a given date, by replaying its full '
+                    . 'transaction history rather than relying on a (paid-only) historical balance snapshot. '
+                    . 'Data is fetched from Routescan (Etherscan-compatible, keyless tier) and cached, so '
+                    . "repeat queries for already-synced ranges never re-hit the upstream source.\n\n"
+                    . 'Currently only Ethereum is active. The architecture supports Base, Polygon, and BNB '
+                    . 'Smart Chain too, but each returned "chain not supported" or was otherwise unverified '
+                    . 'against the live Routescan API and so is disabled for now (see Network::ALL) until '
+                    . 'each is individually confirmed working, the same way Ethereum was.',
                 'version' => '1.0.0'
             ],
             'paths' => [
@@ -313,14 +314,17 @@ class App
                             'date' => ['type' => 'string', 'format' => 'date', 'example' => '2024-01-15'],
                             'holdings' => [
                                 'type' => 'object',
-                                'description' => 'Keyed by network: ethereum, polygon, bnb. (base is temporarily '
-                                    . 'disabled -- not indexed by the current free upstream source -- and will '
-                                    . 'be added back once a working free data source for it is wired in.)',
+                                'description' => 'Keyed by network: currently ethereum only. polygon, bnb, and '
+                                    . 'base are temporarily disabled pending re-verification against the live '
+                                    . 'upstream API (polygon and base were both found to return "chain not '
+                                    . 'supported" despite earlier docs/pages suggesting otherwise; bnb was '
+                                    . 'never independently confirmed). They will be re-added one at a time '
+                                    . 'as each is actually confirmed working.',
                                 'properties' => [
-                                    'ethereum' => ['$ref' => '#/components/schemas/NetworkHoldings'],
+                                    'ethereum' => ['$ref' => '#/components/schemas/NetworkHoldings']
+                                    // 'polygon' => ['$ref' => '#/components/schemas/NetworkHoldings'],
+                                    // 'bnb' => ['$ref' => '#/components/schemas/NetworkHoldings'],
                                     // 'base' => ['$ref' => '#/components/schemas/NetworkHoldings'],
-                                    'polygon' => ['$ref' => '#/components/schemas/NetworkHoldings'],
-                                    'bnb' => ['$ref' => '#/components/schemas/NetworkHoldings']
                                 ]
                             ]
                         ]
