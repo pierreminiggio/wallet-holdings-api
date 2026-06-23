@@ -116,10 +116,15 @@ re-enable based on documentation or a web page:
 
 1. `composer install`
 2. `cp config.example.php config.php` and fill in your DB credentials
-3. Ensure the `bcmath` PHP extension is enabled (used throughout for precise arbitrary-size
+3. (Optional, but recommended) Register a free Etherscan API key at
+   [etherscan.io/myapikey](https://etherscan.io/myapikey) (no credit card) and set it as
+   `etherscan.api_key` in `config.php`. This is used as a fallback when Routescan persistently
+   fails for a specific wallet — see below for why that's a real, observed scenario, not just a
+   theoretical one. Leave it blank to skip the fallback entirely.
+4. Ensure the `bcmath` PHP extension is enabled (used throughout for precise arbitrary-size
    integer arithmetic on wei-level amounts, which exceed native PHP int/float precision)
-4. Run the migration below on your database
-5. Point your webserver's document root to `public/`, or use the provided `.htaccess` with Apache
+5. Run the migration below on your database
+6. Point your webserver's document root to `public/`, or use the provided `.htaccess` with Apache
 
 ## Migration
 
@@ -196,48 +201,49 @@ historical events, a first-ever sync can mean thousands of individual `INSERT` s
 a one-time cost per wallet+network range, not a recurring one, but is worth knowing if a very
 active wallet's first sync feels slow.
 
-## A note on the Routescan keyless tier
+## A note on the Routescan keyless tier, and the Etherscan fallback
 
 This API calls Routescan's keyless public tier (2 requests/second, 10,000 calls/day) for Ethereum,
-the only network currently confirmed and active (Etherscan, the more well-known alternative, has
-at various points restricted free access to some chains too, which is part of why Routescan was
-tried here). Each active network needs up to 3 calls (normal tx, internal tx, token transfers) per
-sync, so a single never-before-seen wallet query currently uses up to 3 calls (would scale with
-each additional network confirmed and re-enabled); cached/already-synced wallets use 0.
+the only network currently confirmed and active, as the primary data source. Each active network
+needs up to 3 calls (normal tx, internal tx, token transfers) per sync, so a single never-before-seen
+wallet query currently uses up to 3 calls (would scale with each additional network confirmed and
+re-enabled); cached/already-synced wallets use 0.
 
 Any single data source (normal tx, internal tx, or token transfers) is capped by the upstream API
 at 10,000 records *per request*, regardless of pagination. If a wallet has more activity than that
 within the range being synced, the API returns a `502` rather than silently returning an incomplete
 (and therefore wrong) balance. There's currently no automatic narrower-range retry for this case.
 
-### Known issue: a specific wallet + endpoint combination can fail permanently, not transiently
+### A real upstream data issue, found and worked around: Etherscan as a fallback provider
 
 While testing, one real wallet's `txlistinternal` (internal transactions) call on Ethereum was
 found to fail with `{"status":"0","message":"An error occurred"}` *every single time*, regardless
 of parameters (tested with and without `startblock`/`endblock`, across several `offset` values),
 while the exact same endpoint worked instantly for a different wallet, and every other endpoint
-(`txlist`, `tokentx`) worked fine for the *same* wallet. That combination of evidence points to a
-genuine upstream indexing issue specific to that one address on Routescan's side, not a transient
-load problem and not a bug in this codebase's request-building.
+(`txlist`, `tokentx`) worked fine for the *same* wallet. That combination of evidence pointed to a
+genuine upstream indexing issue specific to that one address on Routescan's side — confirmed by
+testing the same wallet against Etherscan's own official API (a completely independent backend),
+which returned correct, real data immediately.
 
-This matters because it means the retry logic (4 attempts, described above) will not help in this
-case: it'll dutifully retry 4 times, fail 4 times, and return a `502` — which is the correct
-behavior (failing clearly rather than silently treating the missing data as "this wallet has zero
-internal transactions"), but it's worth knowing that for a small number of wallets, this `502` may
-never go away no matter how many times the request is retried, even though every other wallet and
-every other endpoint works fine. The error message in this case names the specific action that
-failed (e.g. "Could not retrieve txlistinternal data..."), and the server log has the exact upstream
-response, which is the first thing to check if this happens. If it does, the practical next steps
-are: try again after some time has passed (Routescan's indexer may genuinely catch up on its own),
-or report it on [Routescan's bug tracker](https://routescan-bugs.nolt.io/) with the specific address
-and chain, since this is not something fixable from this codebase's side.
+Because of this, `EtherscanCompatibleClient` is now an abstract base class shared by two concrete
+clients: `RoutescanApiClient` (primary, keyless) and `EtherscanApiClient` (fallback, needs a free
+API key — see Setup below). `WalletSyncService` tries the primary first for every call; if and only
+if it fails with a generic, persistent error after exhausting its own retries (`ERROR_UPSTREAM`),
+it retries that one specific call against the fallback instead. Rate-limit, invalid-address, and
+truncated-result errors are *not* retried against the fallback, since switching providers wouldn't
+fix any of those — they're about volume or input validity, not data correctness.
+
+If no Etherscan API key is configured, the fallback is simply skipped (`null`), and a persistent
+Routescan failure surfaces exactly as it did before this fallback existed: a clear `502` naming the
+specific action that failed, with the exact upstream response in the server log.
 
 ### A note on timeouts and PHP's execution time limit
 
-Routescan's free tier has been observed to occasionally fail transiently on a never-before-synced,
-active wallet — a generic `{"status":"0","message":"An error occurred"}`, or an outright connection
-timeout, even when the exact same request succeeds moments later on retry. `RoutescanClient` retries
-a failed call up to 4 times with a short delay between attempts before giving up, which resolves
+Both providers' free tiers have been observed to occasionally fail transiently on a heavy query —
+a generic `{"status":"0","message":"An error occurred"}`, or an outright connection timeout, even
+when the exact same request succeeds moments later on retry. `EtherscanCompatibleClient` retries a
+failed call up to 4 times with a short delay between attempts before giving up (and only then does
+`WalletSyncService` consider falling back to the other provider, as described above), which resolves
 most of these.
 
 A first-ever sync across all active networks can involve many sequential upstream calls (worse if

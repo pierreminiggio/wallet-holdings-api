@@ -5,7 +5,8 @@ namespace App;
 class WalletSyncService
 {
     public function __construct(
-        private RoutescanClient $client,
+        private EtherscanCompatibleClient $primaryClient,
+        private ?EtherscanCompatibleClient $fallbackClient,
         private WalletDataRepository $repository,
         private HoldingsCalculator $calculator
     ) {
@@ -18,9 +19,9 @@ class WalletSyncService
      * date" requirement: a later request for an even later date will simply sync further
      * next time it's needed, rather than this call eagerly fetching "up to now".
      *
-     * @return string|null Null on success, or one of RoutescanClient::ERROR_* on failure.
-     *                       (Not a true|string union, since standalone "true" as a type
-     *                       requires PHP 8.2+ and this project targets PHP 8.0.)
+     * @return string|null Null on success, or one of EtherscanCompatibleClient::ERROR_*
+     *                       on failure. (Not a true|string union, since standalone "true"
+     *                       as a type requires PHP 8.2+ and this project targets PHP 8.0.)
      */
     public function syncUpTo(string $address, string $network, int $untilTimestamp): ?string
     {
@@ -35,19 +36,25 @@ class WalletSyncService
 
         $startBlock = $syncState['lastBlock'] ?? 0;
 
-        $normalTxs = $this->client->getNormalTransactions($chainId, $address, $startBlock, $untilTimestamp);
+        $normalTxs = $this->fetchWithFallback(
+            fn (EtherscanCompatibleClient $client) => $client->getNormalTransactions($chainId, $address, $startBlock, $untilTimestamp)
+        );
 
         if (is_string($normalTxs)) {
             return $normalTxs;
         }
 
-        $internalTxs = $this->client->getInternalTransactions($chainId, $address, $startBlock, $untilTimestamp);
+        $internalTxs = $this->fetchWithFallback(
+            fn (EtherscanCompatibleClient $client) => $client->getInternalTransactions($chainId, $address, $startBlock, $untilTimestamp)
+        );
 
         if (is_string($internalTxs)) {
             return $internalTxs;
         }
 
-        $tokenTransfers = $this->client->getTokenTransfers($chainId, $address, $startBlock, $untilTimestamp);
+        $tokenTransfers = $this->fetchWithFallback(
+            fn (EtherscanCompatibleClient $client) => $client->getTokenTransfers($chainId, $address, $startBlock, $untilTimestamp)
+        );
 
         if (is_string($tokenTransfers)) {
             return $tokenTransfers;
@@ -76,6 +83,38 @@ class WalletSyncService
         $this->repository->setSyncState($address, $network, $newBlock, $newTimestamp);
 
         return null;
+    }
+
+    /**
+     * Tries the primary client first; if it fails with a generic, persistent upstream
+     * error (i.e. it already exhausted its own retries), and a fallback client is
+     * configured, tries that instead. This is specifically for the case where one
+     * provider's indexer has a genuine data problem with a particular wallet+endpoint
+     * combination -- confirmed to happen in practice: a real wallet's internal-transaction
+     * data was found to fail consistently on Routescan while working fine on Etherscan,
+     * for that wallet specifically, while every other wallet and endpoint worked fine on
+     * Routescan. Rate-limit, invalid-address, and truncated-result errors are NOT retried
+     * against the fallback, since switching providers wouldn't fix any of those: a rate
+     * limit and a too-large result set are about volume, not data correctness, and an
+     * invalid address is invalid on both.
+     *
+     * @param callable(EtherscanCompatibleClient): (list<array<string, mixed>>|string) $fetch
+     *
+     * @return list<array<string, mixed>>|string
+     */
+    private function fetchWithFallback(callable $fetch): array|string
+    {
+        $result = $fetch($this->primaryClient);
+
+        if (! is_string($result) || $result !== EtherscanCompatibleClient::ERROR_UPSTREAM) {
+            return $result;
+        }
+
+        if ($this->fallbackClient === null) {
+            return $result;
+        }
+
+        return $fetch($this->fallbackClient);
     }
 
     /**

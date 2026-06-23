@@ -63,11 +63,20 @@ class App
         $targetDate = $requestedDate ?? gmdate('Y-m-d');
         $untilTimestamp = $this->endOfDayTimestamp($targetDate);
 
-        $fetcher = $this->createDatabaseFetcher();
+        $config = $this->loadConfig();
+        $fetcher = $this->createDatabaseFetcher($config);
         $repository = new WalletDataRepository($fetcher);
-        $client = new RoutescanClient();
+
+        $etherscanApiKey = $config['etherscan']['api_key'] ?? '';
+
+        $primaryClient = new RoutescanApiClient();
+        // The fallback is optional: if no key is configured, syncing simply has no
+        // fallback and any persistent upstream error on Routescan surfaces as-is, the
+        // same as before this fallback existed.
+        $fallbackClient = $etherscanApiKey !== '' ? new EtherscanApiClient($etherscanApiKey) : null;
+
         $calculator = new HoldingsCalculator();
-        $syncService = new WalletSyncService($client, $repository, $calculator);
+        $syncService = new WalletSyncService($primaryClient, $fallbackClient, $repository, $calculator);
 
         $holdingsByNetwork = [];
 
@@ -76,7 +85,15 @@ class App
                 $syncResult = $syncService->syncUpTo($address, $network, $untilTimestamp);
 
                 if (is_string($syncResult)) {
-                    [$statusCode, $body] = $this->buildSyncErrorResponse($syncResult, $network, $client);
+                    // Whichever client actually produced the final error (the fallback,
+                    // if one was configured and the primary's error was the kind that
+                    // triggers it; otherwise the primary itself) is the one whose debug
+                    // info is relevant to log.
+                    $erroringClient = $fallbackClient !== null && $syncResult === EtherscanCompatibleClient::ERROR_UPSTREAM
+                        ? $fallbackClient
+                        : $primaryClient;
+
+                    [$statusCode, $body] = $this->buildSyncErrorResponse($syncResult, $network, $erroringClient);
                     http_response_code($statusCode);
                     echo json_encode($body);
 
@@ -110,17 +127,17 @@ class App
     /**
      * @return array{0: int, 1: array<string, mixed>}
      */
-    private function buildSyncErrorResponse(string $errorCode, string $network, RoutescanClient $client): array
+    private function buildSyncErrorResponse(string $errorCode, string $network, EtherscanCompatibleClient $client): array
     {
-        if ($errorCode === RoutescanClient::ERROR_INVALID_ADDRESS) {
+        if ($errorCode === EtherscanCompatibleClient::ERROR_INVALID_ADDRESS) {
             return [400, ['message' => 'Invalid wallet address']];
         }
 
-        if ($errorCode === RoutescanClient::ERROR_RATE_LIMITED) {
+        if ($errorCode === EtherscanCompatibleClient::ERROR_RATE_LIMITED) {
             return [503, ['message' => 'Rate limited by upstream source, please retry shortly']];
         }
 
-        if ($errorCode === RoutescanClient::ERROR_TRUNCATED) {
+        if ($errorCode === EtherscanCompatibleClient::ERROR_TRUNCATED) {
             return [
                 502,
                 [
@@ -133,9 +150,11 @@ class App
 
         $debugInfo = $client->getLastRequestDebugInfo();
         $action = $debugInfo['lastAction'] ?? 'unknown';
+        $provider = get_class($client) === EtherscanApiClient::class ? 'Etherscan (fallback)' : 'Routescan';
 
         error_log(sprintf(
-            'Routescan upstream error on %s (action=%s, page=%s): httpCode=%d curlError=%s responseBody=%s',
+            '%s upstream error on %s (action=%s, page=%s): httpCode=%d curlError=%s responseBody=%s',
+            $provider,
             $network,
             $action,
             $debugInfo['lastPage'] ?? 'unknown',
@@ -147,12 +166,14 @@ class App
         return [
             502,
             [
-                'message' => 'Could not retrieve ' . $action . ' data for ' . $network . ' after retrying. '
+                'message' => 'Could not retrieve ' . $action . ' data for ' . $network . ' after retrying'
+                    . ($provider === 'Etherscan (fallback)' ? ' (including a fallback provider)' : '') . '. '
                     . 'This can be ordinary transient upstream load, but a failure that persists across '
-                    . 'retries for one specific wallet (while the same call works for other wallets) can '
-                    . 'also indicate an upstream indexing issue specific to this address -- in that case '
-                    . 'retrying later is unlikely to help, and the only real fix is on Routescan\'s end. '
-                    . 'See the server log for the exact upstream response.'
+                    . 'every available provider for one specific wallet (while the same call works for '
+                    . 'other wallets) can also indicate an upstream indexing issue specific to this address '
+                    . '-- in that case retrying later may still help eventually, but there is no further '
+                    . 'fallback available from this codebase. See the server log for the exact upstream '
+                    . 'response.'
             ]
         ];
     }
@@ -237,9 +258,8 @@ class App
             ->getTimestamp();
     }
 
-    private function createDatabaseFetcher(): DatabaseFetcher
+    private function createDatabaseFetcher(array $config): DatabaseFetcher
     {
-        $config = require __DIR__ . DIRECTORY_SEPARATOR . '..' . DIRECTORY_SEPARATOR . 'config.php';
         $dbConfig = $config['db'];
 
         return new DatabaseFetcher(new DatabaseConnection(
@@ -250,6 +270,11 @@ class App
         ));
     }
 
+    private function loadConfig(): array
+    {
+        return require __DIR__ . DIRECTORY_SEPARATOR . '..' . DIRECTORY_SEPARATOR . 'config.php';
+    }
+
     private function renderOpenApiDoc(): void
     {
         $spec = [
@@ -258,8 +283,10 @@ class App
                 'title' => 'Wallet Holdings API',
                 'description' => 'Reconstructs what a wallet held, on a given date, by replaying its full '
                     . 'transaction history rather than relying on a (paid-only) historical balance snapshot. '
-                    . 'Data is fetched from Routescan (Etherscan-compatible, keyless tier) and cached, so '
-                    . "repeat queries for already-synced ranges never re-hit the upstream source.\n\n"
+                    . 'Data is fetched primarily from Routescan (Etherscan-compatible, keyless tier), with an '
+                    . 'optional Etherscan API fallback for calls that persistently fail on Routescan for a '
+                    . "specific wallet, and cached, so repeat queries for already-synced ranges never re-hit\n"
+                    . 'either upstream source.\n\n'
                     . 'Currently only Ethereum is active. The architecture supports Base, Polygon, and BNB '
                     . 'Smart Chain too, but each returned "chain not supported" or was otherwise unverified '
                     . 'against the live Routescan API and so is disabled for now (see Network::ALL) until '
