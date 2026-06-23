@@ -12,6 +12,24 @@ class RoutescanClient
     // incomplete list, since silently losing data here would corrupt a balance calculation.
     private const HARD_RECORD_CAP = 10000;
 
+    // A smaller page size than the API's own maximum (1000): large pages on a never-before
+    // synced, active wallet have been observed to intermittently time out or return a
+    // generic "An error occurred" on Routescan's free tier, even though the same query
+    // sometimes succeeds. Smaller pages mean more requests, but each one is cheaper for
+    // their indexer to assemble and is less likely to be the one that gets dropped.
+    private const PAGE_SIZE = 200;
+
+    // Transient-looking failures (timeouts, generic errors, connection issues) are retried
+    // once with a short backoff before being treated as a real failure, since in practice
+    // the same exact request often succeeds on a second attempt a moment later. Kept to a
+    // single retry (2 attempts total) and a short per-call timeout: a full sync can involve
+    // many calls across 4 networks, and most web server setups cap total script execution
+    // around 30s, so a generous retry budget per call could make a slow wallet impossible
+    // to ever sync at all rather than just slow.
+    private const MAX_ATTEMPTS = 2;
+    private const RETRY_DELAY_MICROSECONDS = 1_000_000;
+    private const REQUEST_TIMEOUT_SECONDS = 8;
+
     public const ERROR_RATE_LIMITED = 'rate_limited';
     public const ERROR_UPSTREAM = 'upstream_error';
     public const ERROR_INVALID_ADDRESS = 'invalid_address';
@@ -84,7 +102,7 @@ class RoutescanClient
      */
     private function getPaginated(int $chainId, array $baseParams, int $startBlock, int $untilTimestamp): array|string
     {
-        $pageSize = 1000;
+        $pageSize = self::PAGE_SIZE;
         $page = 1;
         $allRows = [];
 
@@ -158,11 +176,45 @@ class RoutescanClient
      */
     private function request(int $chainId, array $params): array|string
     {
+        for ($attempt = 1; $attempt <= self::MAX_ATTEMPTS; $attempt++) {
+            $result = $this->requestOnce($chainId, $params);
+
+            if (! is_string($result)) {
+                return $result;
+            }
+
+            // Rate-limit and invalid-address responses are not transient: retrying
+            // immediately won't help the former (it would only make it worse) and can't
+            // help the latter at all, so both are returned immediately without retrying.
+            if ($result === self::ERROR_RATE_LIMITED || $result === self::ERROR_INVALID_ADDRESS) {
+                return $result;
+            }
+
+            // Anything else (timeout, connection error, or a generic upstream error like
+            // Routescan's own "An error occurred") has been observed to be transient on
+            // this free tier: the exact same request often succeeds moments later. Retry
+            // with a short delay rather than failing the whole sync on a single bad call.
+            if ($attempt < self::MAX_ATTEMPTS) {
+                usleep(self::RETRY_DELAY_MICROSECONDS);
+            }
+        }
+
+        return self::ERROR_UPSTREAM;
+    }
+
+    /**
+     * @param array<string, string> $params
+     *
+     * @return array<string, mixed>|string Decoded JSON body on success, or one of the
+     *                                       self::ERROR_* constants on failure.
+     */
+    private function requestOnce(int $chainId, array $params): array|string
+    {
         $url = self::BASE_URL . '/' . $chainId . '/etherscan/api?' . http_build_query($params);
 
         $curl = curl_init($url);
         curl_setopt($curl, CURLOPT_RETURNTRANSFER, 1);
-        curl_setopt($curl, CURLOPT_TIMEOUT, 20);
+        curl_setopt($curl, CURLOPT_TIMEOUT, self::REQUEST_TIMEOUT_SECONDS);
         curl_setopt($curl, CURLOPT_HTTPHEADER, ['Accept: application/json']);
         curl_setopt($curl, CURLOPT_USERAGENT, 'wallet-holdings-api/1.0');
 
@@ -193,8 +245,13 @@ class RoutescanClient
             return self::ERROR_UPSTREAM;
         }
 
-        // Etherscan-style status "0" can mean either a real error (bad address, etc.) or
-        // a legitimately empty result; the caller distinguishes those by message content.
+        // Etherscan-style status "0" can mean several different things: a real client-side
+        // error (bad address), a legitimately empty result ("No transactions found", handled
+        // by the caller), or a transient server-side issue (generic "An error occurred",
+        // query timeouts) that's worth retrying rather than failing outright. Only the
+        // address case is identified here as definitively non-retryable; anything else
+        // with status "0" that isn't the empty-result message falls through to
+        // ERROR_UPSTREAM below, which the retry loop in request() will retry.
         if (
             isset($decoded['status'])
             && $decoded['status'] === '0'

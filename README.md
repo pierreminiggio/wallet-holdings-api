@@ -173,3 +173,23 @@ Any single data source (normal tx, internal tx, or token transfers) is capped by
 at 10,000 records *per request*, regardless of pagination. If a wallet has more activity than that
 within the range being synced, the API returns a `502` rather than silently returning an incomplete
 (and therefore wrong) balance. There's currently no automatic narrower-range retry for this case.
+
+### A note on timeouts and PHP's execution time limit
+
+Routescan's free tier has been observed to occasionally fail transiently on a never-before-synced,
+active wallet — a generic `{"status":"0","message":"An error occurred"}`, or an outright connection
+timeout, even when the exact same request succeeds moments later on retry. `RoutescanClient` retries
+once (2 attempts total) with a short delay before giving up, which resolves most of these.
+
+This retry logic adds real time on top of an already request-heavy first sync (up to 12 upstream
+calls across 4 networks), and PHP's default `max_execution_time` is commonly 30 seconds on a typical
+Apache/PHP-FPM setup (PHP's built-in CLI dev server, `php -S`, has no such limit by default, which is
+why this may behave differently in local testing vs. a real deployment). In the worst case — every
+call needing its one retry — a single request could exceed that 30-second budget and be killed by
+the web server before finishing.
+
+If this becomes a practical problem, the options are: raise `max_execution_time` for this endpoint
+specifically (e.g. via `set_time_limit()` at the top of `App::run()`, or a server-level override),
+or split the "ensure synced" step into its own endpoint/job that runs independently of the request
+that reads the (by-then-cached) result — the latter is the more robust fix, but a larger change than
+was in scope here.
