@@ -23,6 +23,14 @@ class App
             return;
         }
 
+        // A first-ever sync for a wallet can involve many sequential upstream calls across
+        // 4 networks (each with its own short per-call timeout and a possible retry), which
+        // can add up to longer than PHP's default execution time limit. Since this work is
+        // legitimate (not a runaway loop) and the person querying has explicitly accepted
+        // that a first sync may take a while, the time limit is removed for this endpoint
+        // specifically rather than raised globally for every PHP script on the server.
+        set_time_limit(0);
+
         $segments = explode('/', $trimmedPath);
 
         if (count($segments) !== 2 || $segments[0] !== self::HOLDINGS_ENDPOINT) {

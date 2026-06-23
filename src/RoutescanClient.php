@@ -20,15 +20,13 @@ class RoutescanClient
     private const PAGE_SIZE = 200;
 
     // Transient-looking failures (timeouts, generic errors, connection issues) are retried
-    // once with a short backoff before being treated as a real failure, since in practice
-    // the same exact request often succeeds on a second attempt a moment later. Kept to a
-    // single retry (2 attempts total) and a short per-call timeout: a full sync can involve
-    // many calls across 4 networks, and most web server setups cap total script execution
-    // around 30s, so a generous retry budget per call could make a slow wallet impossible
-    // to ever sync at all rather than just slow.
-    private const MAX_ATTEMPTS = 2;
-    private const RETRY_DELAY_MICROSECONDS = 1_000_000;
-    private const REQUEST_TIMEOUT_SECONDS = 8;
+    // with a short backoff before being treated as a real failure, since in practice the
+    // same exact request often succeeds on a second or third attempt a moment later.
+    // App::run() removes the script execution time limit for this endpoint specifically,
+    // so this can afford to be more generous than a 30-second budget would allow.
+    private const MAX_ATTEMPTS = 4;
+    private const RETRY_DELAY_MICROSECONDS = 2_000_000;
+    private const REQUEST_TIMEOUT_SECONDS = 20;
 
     public const ERROR_RATE_LIMITED = 'rate_limited';
     public const ERROR_UPSTREAM = 'upstream_error';
