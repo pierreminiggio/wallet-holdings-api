@@ -133,8 +133,10 @@ class App
 
         $debugInfo = $client->getLastRequestDebugInfo();
         error_log(sprintf(
-            'Routescan upstream error on %s: httpCode=%d curlError=%s responseBody=%s',
+            'Routescan upstream error on %s (action=%s, page=%s): httpCode=%d curlError=%s responseBody=%s',
             $network,
+            $debugInfo['lastAction'] ?? 'unknown',
+            $debugInfo['lastPage'] ?? 'unknown',
             $debugInfo['httpCode'],
             $debugInfo['curlError'] !== '' ? $debugInfo['curlError'] : '(none)',
             $debugInfo['responseBody'] !== null ? substr($debugInfo['responseBody'], 0, 500) : '(none)'

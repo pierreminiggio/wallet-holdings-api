@@ -36,6 +36,8 @@ class RoutescanClient
     private int $lastHttpCode = 0;
     private string $lastCurlError = '';
     private ?string $lastResponseBody = null;
+    private ?string $lastAction = null;
+    private ?string $lastPage = null;
 
     /**
      * Fetches every normal transaction involving $address on the given chain, starting
@@ -208,6 +210,9 @@ class RoutescanClient
      */
     private function requestOnce(int $chainId, array $params): array|string
     {
+        $this->lastAction = $params['action'] ?? null;
+        $this->lastPage = $params['page'] ?? null;
+
         $url = self::BASE_URL . '/' . $chainId . '/etherscan/api?' . http_build_query($params);
 
         $curl = curl_init($url);
@@ -275,14 +280,16 @@ class RoutescanClient
     }
 
     /**
-     * @return array{httpCode: int, curlError: string, responseBody: string|null}
+     * @return array{httpCode: int, curlError: string, responseBody: string|null, lastAction: string|null, lastPage: string|null}
      */
     public function getLastRequestDebugInfo(): array
     {
         return [
             'httpCode' => $this->lastHttpCode,
             'curlError' => $this->lastCurlError,
-            'responseBody' => $this->lastResponseBody
+            'responseBody' => $this->lastResponseBody,
+            'lastAction' => $this->lastAction,
+            'lastPage' => $this->lastPage
         ];
     }
 }
