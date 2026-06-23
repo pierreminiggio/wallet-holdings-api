@@ -210,6 +210,28 @@ at 10,000 records *per request*, regardless of pagination. If a wallet has more 
 within the range being synced, the API returns a `502` rather than silently returning an incomplete
 (and therefore wrong) balance. There's currently no automatic narrower-range retry for this case.
 
+### Known issue: a specific wallet + endpoint combination can fail permanently, not transiently
+
+While testing, one real wallet's `txlistinternal` (internal transactions) call on Ethereum was
+found to fail with `{"status":"0","message":"An error occurred"}` *every single time*, regardless
+of parameters (tested with and without `startblock`/`endblock`, across several `offset` values),
+while the exact same endpoint worked instantly for a different wallet, and every other endpoint
+(`txlist`, `tokentx`) worked fine for the *same* wallet. That combination of evidence points to a
+genuine upstream indexing issue specific to that one address on Routescan's side, not a transient
+load problem and not a bug in this codebase's request-building.
+
+This matters because it means the retry logic (4 attempts, described above) will not help in this
+case: it'll dutifully retry 4 times, fail 4 times, and return a `502` — which is the correct
+behavior (failing clearly rather than silently treating the missing data as "this wallet has zero
+internal transactions"), but it's worth knowing that for a small number of wallets, this `502` may
+never go away no matter how many times the request is retried, even though every other wallet and
+every other endpoint works fine. The error message in this case names the specific action that
+failed (e.g. "Could not retrieve txlistinternal data..."), and the server log has the exact upstream
+response, which is the first thing to check if this happens. If it does, the practical next steps
+are: try again after some time has passed (Routescan's indexer may genuinely catch up on its own),
+or report it on [Routescan's bug tracker](https://routescan-bugs.nolt.io/) with the specific address
+and chain, since this is not something fixable from this codebase's side.
+
 ### A note on timeouts and PHP's execution time limit
 
 Routescan's free tier has been observed to occasionally fail transiently on a never-before-synced,

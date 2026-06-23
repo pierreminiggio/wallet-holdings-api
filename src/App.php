@@ -132,17 +132,29 @@ class App
         }
 
         $debugInfo = $client->getLastRequestDebugInfo();
+        $action = $debugInfo['lastAction'] ?? 'unknown';
+
         error_log(sprintf(
             'Routescan upstream error on %s (action=%s, page=%s): httpCode=%d curlError=%s responseBody=%s',
             $network,
-            $debugInfo['lastAction'] ?? 'unknown',
+            $action,
             $debugInfo['lastPage'] ?? 'unknown',
             $debugInfo['httpCode'],
             $debugInfo['curlError'] !== '' ? $debugInfo['curlError'] : '(none)',
             $debugInfo['responseBody'] !== null ? substr($debugInfo['responseBody'], 0, 500) : '(none)'
         ));
 
-        return [502, ['message' => 'Could not retrieve wallet data for ' . $network]];
+        return [
+            502,
+            [
+                'message' => 'Could not retrieve ' . $action . ' data for ' . $network . ' after retrying. '
+                    . 'This can be ordinary transient upstream load, but a failure that persists across '
+                    . 'retries for one specific wallet (while the same call works for other wallets) can '
+                    . 'also indicate an upstream indexing issue specific to this address -- in that case '
+                    . 'retrying later is unlikely to help, and the only real fix is on Routescan\'s end. '
+                    . 'See the server log for the exact upstream response.'
+            ]
+        ];
     }
 
     /**
