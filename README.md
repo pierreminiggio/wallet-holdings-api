@@ -1,7 +1,11 @@
 # wallet-holdings-api
 
 Reconstructs what an EVM wallet held — native coin and ERC-20/BEP-20 tokens — on a given date,
-across Ethereum, Base, Polygon and BNB Smart Chain.
+across Ethereum, Polygon and BNB Smart Chain.
+
+**Base support is temporarily disabled** — see "Why Base is currently disabled" below — but the
+architecture is network-agnostic (driven entirely by `Network::ALL`), so adding it back later is
+a small, contained change once a working free data source for it is wired in.
 
 ## Why "reconstruct" instead of "look up"
 
@@ -18,12 +22,12 @@ reuses what's already cached and only fetches the gap, if any.
 
 ## Endpoints
 
-* `GET /holdings/{address}` - Holdings across all 4 networks, as of today (UTC).
+* `GET /holdings/{address}` - Holdings across all active networks, as of today (UTC).
 * `GET /holdings/{address}?date=YYYY-MM-DD` - Holdings as of the end of the given UTC day.
 * `GET /openapi` - Interactive API documentation (Swagger UI).
 
 `{address}` must be a `0x`-prefixed, 40-hex-character EVM address (the same address format works
-identically across all 4 networks, since they're all EVM-compatible).
+identically across every network, since they're all EVM-compatible).
 
 ### Example
 
@@ -39,7 +43,6 @@ GET /holdings/0x1234567890123456789012345678901234567890?date=2024-06-15
         { "symbol": "USDC", "contract": "0xa0b8...", "amount": "500" }
       ]
     },
-    "base": { "native": { "symbol": "ETH", "amount": "0" }, "tokens": [] },
     "polygon": { "native": { "symbol": "MATIC", "amount": "120.4" }, "tokens": [] },
     "bnb": { "native": { "symbol": "BNB", "amount": "0.2" }, "tokens": [] }
   }
@@ -76,6 +79,27 @@ between two different internal transfers *within the exact same transaction* —
 would require a transaction with an enormous number of internal calls to ever matter. Avoiding
 this entirely would require widening the `log_index` column to a string, which wasn't done here
 to keep the schema aligned with the other event table.
+
+## Why Base is currently disabled
+
+Routescan's free/keyless tier does not index Base — confirmed directly by the API itself, which
+returns `{"status":"0","message":"chain not supported"}` for chain ID 8453, despite some
+third-party reporting suggesting otherwise. Ethereum, Polygon, and BNB Smart Chain are all
+confirmed working (each verified directly against the live API, not just assumed from chain ID).
+
+Etherscan's own official V2 API does support Base, and would be the natural fix, but requires
+registering for a separate free API key (no credit card, but a distinct signup step and a new
+config value) rather than working keyless like Routescan does for the other three networks. That
+was out of scope for now.
+
+To re-enable Base later:
+
+1. Add `self::BASE` back into `Network::ALL` in `src/Network.php`.
+2. Either confirm Routescan has since added free Base support (re-test the same `txlist` call
+   that currently returns `"chain not supported"`), or add a second client (e.g. an
+   `EtherscanClient` alongside `RoutescanClient`) and route Base's calls through it instead in
+   `WalletSyncService`.
+3. Restore the `base` entries removed from the OpenAPI spec in `App::renderOpenApiDoc()`.
 
 ## Setup
 
@@ -164,10 +188,11 @@ active wallet's first sync feels slow.
 ## A note on the Routescan keyless tier
 
 This API calls Routescan's keyless public tier (2 requests/second, 10,000 calls/day), chosen as a
-single Etherscan-compatible provider covering all 4 networks for free (Etherscan itself has, at
-various points, restricted free access to some of these chains). Each of the 4 networks needs up
-to 3 calls (normal tx, internal tx, token transfers) per sync, so a single never-before-seen wallet
-query can use up to 12 calls; cached/already-synced wallets use 0.
+single Etherscan-compatible provider covering Ethereum, Polygon, and BNB for free (Etherscan itself
+has, at various points, restricted free access to some of these chains). Each active network needs
+up to 3 calls (normal tx, internal tx, token transfers) per sync, so a single never-before-seen
+wallet query can use up to 9 calls right now (would be up to 12 with Base re-enabled); cached/
+already-synced wallets use 0.
 
 Any single data source (normal tx, internal tx, or token transfers) is capped by the upstream API
 at 10,000 records *per request*, regardless of pagination. If a wallet has more activity than that
@@ -182,10 +207,11 @@ timeout, even when the exact same request succeeds moments later on retry. `Rout
 a failed call up to 4 times with a short delay between attempts before giving up, which resolves
 most of these.
 
-A first-ever sync across 4 networks can involve many sequential upstream calls (worse if some need
-retries), which can legitimately take a while. `App::run()` calls `set_time_limit(0)` for this
-reason, removing PHP's own script execution time limit specifically for the `/holdings` endpoint,
-so a slow first sync is allowed to simply keep running rather than being killed partway through.
+A first-ever sync across all active networks can involve many sequential upstream calls (worse if
+some need retries), which can legitimately take a while. `App::run()` calls `set_time_limit(0)` for
+this reason, removing PHP's own script execution time limit specifically for the `/holdings`
+endpoint, so a slow first sync is allowed to simply keep running rather than being killed partway
+through.
 
 This works reliably with PHP's built-in CLI development server (`php -S`) and with most traditional
 Apache+mod_php setups. It's worth knowing that `set_time_limit()` does **not** override every

@@ -242,11 +242,13 @@ class App
             'openapi' => '3.0.3',
             'info' => [
                 'title' => 'Wallet Holdings API',
-                'description' => 'Reconstructs what a wallet held, on a given date, across Ethereum, Base, '
+                'description' => 'Reconstructs what a wallet held, on a given date, across Ethereum, '
                     . 'Polygon and BNB Smart Chain, by replaying its full transaction history rather than '
                     . 'relying on a (paid-only) historical balance snapshot. Data is fetched from Routescan '
                     . "(Etherscan-compatible, keyless tier) and cached, so repeat queries for already-synced\n"
-                    . 'ranges never re-hit the upstream source.',
+                    . 'ranges never re-hit the upstream source. (Base is temporarily disabled: Routescan\'s '
+                    . 'free tier does not index it. See Network::ALL to re-enable once a working free data '
+                    . 'source for Base is wired in.)',
                 'version' => '1.0.0'
             ],
             'paths' => [
@@ -311,10 +313,12 @@ class App
                             'date' => ['type' => 'string', 'format' => 'date', 'example' => '2024-01-15'],
                             'holdings' => [
                                 'type' => 'object',
-                                'description' => 'Keyed by network: ethereum, base, polygon, bnb',
+                                'description' => 'Keyed by network: ethereum, polygon, bnb. (base is temporarily '
+                                    . 'disabled -- not indexed by the current free upstream source -- and will '
+                                    . 'be added back once a working free data source for it is wired in.)',
                                 'properties' => [
                                     'ethereum' => ['$ref' => '#/components/schemas/NetworkHoldings'],
-                                    'base' => ['$ref' => '#/components/schemas/NetworkHoldings'],
+                                    // 'base' => ['$ref' => '#/components/schemas/NetworkHoldings'],
                                     'polygon' => ['$ref' => '#/components/schemas/NetworkHoldings'],
                                     'bnb' => ['$ref' => '#/components/schemas/NetworkHoldings']
                                 ]

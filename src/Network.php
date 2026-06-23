@@ -28,7 +28,13 @@ class Network
     // depending on which date is being queried.
     private const POLYGON_POL_MIGRATION_DATE = '2024-09-04';
 
-    public const ALL = [self::ETHEREUM, self::BASE, self::POLYGON, self::BNB];
+    // Base is temporarily disabled: Routescan's free tier doesn't index it ("chain not
+    // supported" returned directly by their API), unlike Ethereum/Polygon/BNB which are all
+    // confirmed working. Re-enabling Base requires a different upstream client (e.g.
+    // Etherscan's official V2 API, which does support Base, but needs its own free API key)
+    // rather than just adding it back here. See RoutescanClient and WalletSyncService for
+    // the other places Base-specific wiring would need to be added back.
+    public const ALL = [self::ETHEREUM, self::POLYGON, self::BNB /*, self::BASE */];
 
     public static function isValid(string $network): bool
     {
