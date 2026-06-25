@@ -66,22 +66,15 @@ class App
         $config = $this->loadConfig();
         $fetcher = $this->createDatabaseFetcher($config);
         $repository = new WalletDataRepository($fetcher);
-
-        $etherscanApiKey = $config['etherscan']['api_key'] ?? '';
-
-        $primaryClient = new RoutescanApiClient();
-        // The fallback is optional: if no key is configured, syncing simply has no
-        // fallback and any persistent upstream error on Routescan surfaces as-is, the
-        // same as before this fallback existed.
-        $fallbackClient = $etherscanApiKey !== '' ? new EtherscanApiClient($etherscanApiKey) : null;
-
         $calculator = new HoldingsCalculator();
-        $syncService = new WalletSyncService($primaryClient, $fallbackClient, $repository, $calculator);
 
         $holdingsByNetwork = [];
 
         try {
             foreach (Network::ALL as $network) {
+                [$primaryClient, $fallbackClient] = $this->createClientsForNetwork($network, $config);
+                $syncService = new WalletSyncService($primaryClient, $fallbackClient, $repository, $calculator);
+
                 $syncResult = $syncService->syncUpTo($address, $network, $untilTimestamp);
 
                 if (is_string($syncResult)) {
@@ -176,6 +169,32 @@ class App
                     . 'response.'
             ]
         ];
+    }
+
+    /**
+     * Builds the (primary, fallback) client pair for a given network. Each network can have
+     * a different primary provider, since not every provider covers every chain (Routescan
+     * doesn't index Base at all, confirmed directly against its API, so Base needs its own
+     * dedicated primary -- Blockscout's Base instance -- rather than sharing Ethereum's
+     * Routescan+Etherscan pair).
+     *
+     * @return array{0: EtherscanCompatibleClient, 1: EtherscanCompatibleClient|null}
+     */
+    private function createClientsForNetwork(string $network, array $config): array
+    {
+        if ($network === Network::BASE) {
+            // No fallback configured yet for Base: Etherscan's free tier doesn't cover it
+            // either (confirmed directly: "Free API access is not supported for this
+            // chain"), so there's currently no second option if Blockscout itself has a
+            // persistent issue for a specific wallet, the same way Routescan did for one
+            // wallet on Ethereum.
+            return [new BaseBlockscoutApiClient(), null];
+        }
+
+        $etherscanApiKey = $config['etherscan']['api_key'] ?? '';
+        $fallbackClient = $etherscanApiKey !== '' ? new EtherscanApiClient($etherscanApiKey) : null;
+
+        return [new RoutescanApiClient(), $fallbackClient];
     }
 
     /**
@@ -283,14 +302,15 @@ class App
                 'title' => 'Wallet Holdings API',
                 'description' => 'Reconstructs what a wallet held, on a given date, by replaying its full '
                     . 'transaction history rather than relying on a (paid-only) historical balance snapshot. '
-                    . 'Data is fetched primarily from Routescan (Etherscan-compatible, keyless tier), with an '
-                    . 'optional Etherscan API fallback for calls that persistently fail on Routescan for a '
-                    . "specific wallet, and cached, so repeat queries for already-synced ranges never re-hit\n"
-                    . 'either upstream source.\n\n'
-                    . 'Currently only Ethereum is active. The architecture supports Base, Polygon, and BNB '
-                    . 'Smart Chain too, but each returned "chain not supported" or was otherwise unverified '
-                    . 'against the live Routescan API and so is disabled for now (see Network::ALL) until '
-                    . 'each is individually confirmed working, the same way Ethereum was.',
+                    . 'Ethereum uses Routescan (Etherscan-compatible, keyless tier) as its primary source, with '
+                    . 'an optional Etherscan API fallback for calls that persistently fail on Routescan for a '
+                    . "specific wallet. Base uses its own Blockscout instance instead (Routescan doesn't index\n"
+                    . 'Base, and Etherscan\'s free tier excludes it too). Results are cached, so repeat queries '
+                    . 'for already-synced ranges never re-hit any upstream source.\n\n'
+                    . 'Currently Ethereum and Base are active. Polygon and BNB Smart Chain are not yet: each '
+                    . 'returned "chain not supported" from Routescan or was otherwise unverified against a live '
+                    . 'API and so is disabled for now (see Network::ALL) until each is individually confirmed '
+                    . 'working with some provider, the same way Ethereum and Base were.',
                 'version' => '1.0.0'
             ],
             'paths' => [
@@ -355,17 +375,17 @@ class App
                             'date' => ['type' => 'string', 'format' => 'date', 'example' => '2024-01-15'],
                             'holdings' => [
                                 'type' => 'object',
-                                'description' => 'Keyed by network: currently ethereum only. polygon, bnb, and '
-                                    . 'base are temporarily disabled pending re-verification against the live '
-                                    . 'upstream API (polygon and base were both found to return "chain not '
-                                    . 'supported" despite earlier docs/pages suggesting otherwise; bnb was '
-                                    . 'never independently confirmed). They will be re-added one at a time '
-                                    . 'as each is actually confirmed working.',
+                                'description' => 'Keyed by network: currently ethereum and base. polygon and bnb '
+                                    . 'are temporarily disabled pending verification against a live upstream API '
+                                    . '(polygon was found to return "chain not supported" on Routescan despite '
+                                    . 'an earlier docs/page suggesting otherwise; bnb was never independently '
+                                    . 'confirmed at all). They will be re-added one at a time as each is '
+                                    . 'actually confirmed working with some provider.',
                                 'properties' => [
-                                    'ethereum' => ['$ref' => '#/components/schemas/NetworkHoldings']
+                                    'ethereum' => ['$ref' => '#/components/schemas/NetworkHoldings'],
+                                    'base' => ['$ref' => '#/components/schemas/NetworkHoldings']
                                     // 'polygon' => ['$ref' => '#/components/schemas/NetworkHoldings'],
                                     // 'bnb' => ['$ref' => '#/components/schemas/NetworkHoldings'],
-                                    // 'base' => ['$ref' => '#/components/schemas/NetworkHoldings'],
                                 ]
                             ]
                         ]
