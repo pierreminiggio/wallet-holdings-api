@@ -110,6 +110,35 @@ neither Routescan nor Etherscan covers it as a backup option). If Base's Blocksc
 has the same kind of persistent, wallet-specific failure Routescan had on Ethereum (see below),
 there's currently no second provider to fall back to for Base specifically.
 
+## A real bug this surfaced: Blockscout's "not yet indexed" status was silently treated as success
+
+While testing a real Base wallet, native ETH and a few token balances came back negative —
+impossible, since a wallet can't spend more than it ever received. The actual cause: Blockscout's
+internal-transactions endpoint can return `{"status":"2","message":"Some internal transactions
+within this block range have not yet been processed","result":[]}` for a block range that hasn't
+finished indexing yet. That's a meaningfully different signal from `status: "0"` ("this address
+genuinely has no internal transactions"), but the code only ever checked for `status === "0"`, so
+a `status: "2"` response fell through and was treated as a normal, successful, empty result.
+
+That's a serious bug, not a cosmetic one: once a block range is synced, `WalletSyncService` marks
+it complete and never re-fetches it. Any real incoming internal transfers in a range that returned
+`status: "2"` were silently and *permanently* dropped from the balance calculation — which is
+exactly what produces an impossible negative balance (real ETH spent, but some real ETH received
+never counted).
+
+Internal-transaction indexing on Blockscout is documented as its slowest indexer stage, often
+lagging well behind regular block/transaction indexing. The natural instinct is to retry after a
+short delay, the same way other transient errors here are handled — but testing the exact same
+request directly showed it returning `status: "2"` *consistently*, not intermittently, for the
+same block range. So `status: "2"` (`EtherscanCompatibleClient::ERROR_NOT_YET_INDEXED`) is
+deliberately **not** retried: it fails immediately with a clear `503`, distinct from a generic
+upstream error, rather than burning through the retry budget on something that won't clear up
+quickly.
+
+If you see this `503`, the practical next step is to wait and retry the whole request later, once
+Blockscout's indexer has actually caught up for that range — there's no faster fix available from
+this codebase's side.
+
 ## Why Polygon and BNB aren't active yet
 
 * **Polygon**: `"chain not supported"` returned directly by Routescan's live API for chain ID

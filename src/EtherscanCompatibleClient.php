@@ -30,6 +30,7 @@ abstract class EtherscanCompatibleClient
     public const ERROR_UPSTREAM = 'upstream_error';
     public const ERROR_INVALID_ADDRESS = 'invalid_address';
     public const ERROR_TRUNCATED = 'truncated';
+    public const ERROR_NOT_YET_INDEXED = 'not_yet_indexed';
 
     private int $lastHttpCode = 0;
     private string $lastCurlError = '';
@@ -193,7 +194,15 @@ abstract class EtherscanCompatibleClient
             // Rate-limit and invalid-address responses are not transient: retrying
             // immediately won't help the former (it would only make it worse) and can't
             // help the latter at all, so both are returned immediately without retrying.
-            if ($result === self::ERROR_RATE_LIMITED || $result === self::ERROR_INVALID_ADDRESS) {
+            // Confirmed-not-yet-indexed (Blockscout status "2") is excluded too: tested
+            // directly against a real, persistent case where the same request kept
+            // returning status "2" consistently rather than clearing up, so retrying
+            // would only waste time without ever succeeding.
+            if (
+                $result === self::ERROR_RATE_LIMITED
+                || $result === self::ERROR_INVALID_ADDRESS
+                || $result === self::ERROR_NOT_YET_INDEXED
+            ) {
                 return $result;
             }
 
@@ -253,6 +262,30 @@ abstract class EtherscanCompatibleClient
 
         if (! is_array($decoded)) {
             return self::ERROR_UPSTREAM;
+        }
+
+        // Blockscout-specific: status "2" means the requested block range hasn't finished
+        // being indexed yet, with result explicitly empty -- a genuinely different signal
+        // from "this address has no internal transactions". Confirmed via a real response:
+        // {"message":"Some internal transactions within this block range have not yet been
+        // processed","result":[],"status":"2"}. This MUST NOT be treated as a successful
+        // empty result: silently accepting it as "zero internal transactions" was a real,
+        // confirmed bug that caused incoming internal transfers to be permanently missed
+        // (the sync state gets marked complete for that range and is never re-checked),
+        // directly producing impossible negative balances -- a wallet appeared to have
+        // spent more ETH than it ever received.
+        //
+        // Unlike most errors here, this is NOT retried: internal-transaction indexing lag
+        // on Blockscout is a known, sometimes lengthy background process (its own docs
+        // describe it as the slowest indexer stage, separate from block/transaction
+        // indexing), and testing this specific case directly showed the same address and
+        // block range returning status "2" consistently, not intermittently -- a short
+        // retry delay would just waste time without ever succeeding. ERROR_NOT_YET_INDEXED
+        // is therefore excluded from the retry loop in request(), the same way
+        // ERROR_RATE_LIMITED and ERROR_INVALID_ADDRESS are, and surfaces to the caller
+        // immediately as a clear, distinct failure rather than a generic upstream error.
+        if (isset($decoded['status']) && $decoded['status'] === '2') {
+            return self::ERROR_NOT_YET_INDEXED;
         }
 
         // Etherscan-style status "0" can mean several different things, and they need to

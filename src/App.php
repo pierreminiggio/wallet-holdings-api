@@ -141,9 +141,26 @@ class App
             ];
         }
 
+        if ($errorCode === EtherscanCompatibleClient::ERROR_NOT_YET_INDEXED) {
+            return [
+                503,
+                [
+                    'message' => 'The upstream explorer for ' . $network . ' has not finished indexing internal '
+                        . 'transactions for part of the date range needed for this request. This is a real '
+                        . 'indexing backlog on their end (confirmed to persist rather than clear up quickly for '
+                        . 'at least one block range), not a transient error, so immediate retries are unlikely '
+                        . 'to help; trying again after some time has passed is the practical next step.'
+                ]
+            ];
+        }
+
         $debugInfo = $client->getLastRequestDebugInfo();
         $action = $debugInfo['lastAction'] ?? 'unknown';
-        $provider = get_class($client) === EtherscanApiClient::class ? 'Etherscan (fallback)' : 'Routescan';
+        $provider = match (get_class($client)) {
+            EtherscanApiClient::class => 'Etherscan (fallback)',
+            BaseBlockscoutApiClient::class => 'Blockscout (Base)',
+            default => 'Routescan'
+        };
 
         error_log(sprintf(
             '%s upstream error on %s (action=%s, page=%s): httpCode=%d curlError=%s responseBody=%s',
