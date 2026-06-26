@@ -5,6 +5,51 @@ namespace App;
 class HoldingsCalculator
 {
     /**
+     * Truncates a string to at most $maxBytes bytes without splitting a multi-byte UTF-8
+     * character in half (which would otherwise produce invalid, mis-rendering UTF-8 when
+     * stored). Deliberately avoids mb_substr(): mbstring is a non-default PHP extension
+     * and isn't guaranteed to be enabled (confirmed not enabled by default on common
+     * Windows/XAMPP setups), and this needed to work without that dependency.
+     *
+     * Cuts at $maxBytes bytes first (cheap, always safe as an upper bound), then walks
+     * backwards removing any trailing bytes that are part of an incomplete multi-byte
+     * character: continuation bytes (10xxxxxx, 0x80-0xBF) are always incomplete without
+     * a lead byte before them, and a lead byte (11xxxxxx, 0xC0-0xFF) left as the very
+     * last byte is incomplete too, since it announces continuation bytes that aren't
+     * there. (An earlier version of this only handled the first case, which left a
+     * dangling lead byte -- e.g. truncating "HELLO🎉" mid-emoji left a trailing 0xF0
+     * with nothing after it, still invalid UTF-8 despite no continuation bytes
+     * remaining; caught by testing the logic directly against a real multi-byte
+     * character rather than assuming it was correct.)
+     */
+    private static function truncateUtf8Safely(string $value, int $maxBytes): string
+    {
+        if (strlen($value) <= $maxBytes) {
+            return $value;
+        }
+
+        $truncated = substr($value, 0, $maxBytes);
+
+        // Strip any trailing continuation bytes (0x80-0xBF): each one is only valid
+        // immediately after a lead byte, so a continuation byte at the very end with no
+        // guarantee its lead byte is intact means it must go.
+        while ($truncated !== '' && (ord($truncated[strlen($truncated) - 1]) & 0xC0) === 0x80) {
+            $truncated = substr($truncated, 0, -1);
+        }
+
+        // After stripping continuation bytes, the new last byte might itself be a
+        // multi-byte lead byte (0xC0-0xFF) that's now missing its continuation bytes --
+        // e.g. cutting right after a 4-byte character's first byte. A lead byte is only
+        // valid when followed by its continuation bytes, so if it's now the last byte
+        // in the string, it's incomplete and must be removed too.
+        if ($truncated !== '' && (ord($truncated[strlen($truncated) - 1]) & 0xC0) === 0xC0) {
+            $truncated = substr($truncated, 0, -1);
+        }
+
+        return $truncated;
+    }
+
+    /**
      * Converts a wallet's normal + internal transactions into a list of signed native-coin
      * balance-change events. One row per value movement, plus one extra row per outgoing
      * normal transaction for the gas fee paid (since gas is deducted from the sender
@@ -171,7 +216,17 @@ class HoldingsCalculator
             $blockNumber = (int) $transfer['blockNumber'];
             $timestamp = (int) $transfer['timeStamp'];
             $contract = strtolower($transfer['contractAddress']);
-            $symbol = $transfer['tokenSymbol'] ?? '???';
+            // Truncated defensively: real token symbols have no protocol-level length
+            // limit (anyone deploying a token contract can set an arbitrarily long name),
+            // and one was already observed in practice to exceed the database column's
+            // size. Truncation is done with self::truncateUtf8Safely() rather than
+            // mb_substr(), since mbstring is a non-default PHP extension not guaranteed
+            // to be enabled (confirmed not enabled by default even on common Windows/XAMPP
+            // setups) -- splitting a multi-byte character (e.g. an emoji some tokens use
+            // as their symbol) in half would otherwise store invalid UTF-8. Kept in sync
+            // with the `token_symbol` column's varchar(128) size in the migration -- if
+            // that's ever changed, update this limit too.
+            $symbol = self::truncateUtf8Safely((string) ($transfer['tokenSymbol'] ?? '???'), 128);
             $decimals = (int) ($transfer['tokenDecimal'] ?? 18);
 
             $eventIndexByTxHash[$hash] = ($eventIndexByTxHash[$hash] ?? -1) + 1;

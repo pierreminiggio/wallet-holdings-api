@@ -200,7 +200,7 @@ CREATE TABLE `wallet_token_event` (
   `block_number` bigint(20) NOT NULL,
   `block_timestamp` bigint(20) NOT NULL,
   `token_contract` varchar(42) NOT NULL,
-  `token_symbol` varchar(32) NOT NULL,
+  `token_symbol` varchar(128) NOT NULL,
   `token_decimals` tinyint(4) NOT NULL,
   `signed_amount` decimal(50,0) NOT NULL,
   `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP
