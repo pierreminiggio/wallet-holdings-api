@@ -145,11 +145,13 @@ class App
             return [
                 503,
                 [
-                    'message' => 'The upstream explorer for ' . $network . ' has not finished indexing internal '
-                        . 'transactions for part of the date range needed for this request. This is a real '
-                        . 'indexing backlog on their end (confirmed to persist rather than clear up quickly for '
-                        . 'at least one block range), not a transient error, so immediate retries are unlikely '
-                        . 'to help; trying again after some time has passed is the practical next step.'
+                    'message' => 'The upstream explorer for ' . $network . ' reports that internal transactions '
+                        . 'for part of the needed date range are not fully indexed yet. Since incoming and '
+                        . 'outgoing transfers can both be missing from a partial result, using it could produce '
+                        . 'either an understated or an overstated balance -- not a closer approximation, just a '
+                        . 'different wrong number -- so no holdings are returned rather than risk an incorrect '
+                        . 'one. This has been observed to persist for the same block range rather than resolve '
+                        . 'quickly, so there is no reliable wait time to suggest.'
                 ]
             ];
         }

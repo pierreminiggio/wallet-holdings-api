@@ -194,10 +194,13 @@ abstract class EtherscanCompatibleClient
             // Rate-limit and invalid-address responses are not transient: retrying
             // immediately won't help the former (it would only make it worse) and can't
             // help the latter at all, so both are returned immediately without retrying.
-            // Confirmed-not-yet-indexed (Blockscout status "2") is excluded too: tested
-            // directly against a real, persistent case where the same request kept
-            // returning status "2" consistently rather than clearing up, so retrying
-            // would only waste time without ever succeeding.
+            // Not-yet-indexed (Blockscout status "2") is excluded too: confirmed via two
+            // independent tests (this wallet, and an unrelated heavily-used contract) that
+            // it reproduces consistently for the same block range rather than clearing up
+            // moments later, so retrying within this request would only waste time. (Also
+            // worth noting: without this exclusion, the loop would retry it anyway and
+            // then fall through to returning the generic ERROR_UPSTREAM once attempts ran
+            // out, silently discarding this more specific and more useful error code.)
             if (
                 $result === self::ERROR_RATE_LIMITED
                 || $result === self::ERROR_INVALID_ADDRESS
@@ -265,25 +268,26 @@ abstract class EtherscanCompatibleClient
         }
 
         // Blockscout-specific: status "2" means the requested block range hasn't finished
-        // being indexed yet, with result explicitly empty -- a genuinely different signal
-        // from "this address has no internal transactions". Confirmed via a real response:
-        // {"message":"Some internal transactions within this block range have not yet been
-        // processed","result":[],"status":"2"}. This MUST NOT be treated as a successful
-        // empty result: silently accepting it as "zero internal transactions" was a real,
-        // confirmed bug that caused incoming internal transfers to be permanently missed
-        // (the sync state gets marked complete for that range and is never re-checked),
-        // directly producing impossible negative balances -- a wallet appeared to have
-        // spent more ETH than it ever received.
+        // being indexed yet for internal transactions, sometimes with a genuinely empty
+        // result, sometimes with real partial data alongside the warning -- confirmed via
+        // direct testing on a real, unrelated wallet (Base's own bridge contract), so this
+        // isn't specific to one address or a momentary blip: it's a known, possibly
+        // long-lived characteristic of Blockscout's legacy API (Blockscout's own
+        // per-transaction status message is "Awaiting internal transactions for status",
+        // reported as far back as 2021 and still relevant in current Blockscout migration
+        // discussions elsewhere).
         //
-        // Unlike most errors here, this is NOT retried: internal-transaction indexing lag
-        // on Blockscout is a known, sometimes lengthy background process (its own docs
-        // describe it as the slowest indexer stage, separate from block/transaction
-        // indexing), and testing this specific case directly showed the same address and
-        // block range returning status "2" consistently, not intermittently -- a short
-        // retry delay would just waste time without ever succeeding. ERROR_NOT_YET_INDEXED
-        // is therefore excluded from the retry loop in request(), the same way
-        // ERROR_RATE_LIMITED and ERROR_INVALID_ADDRESS are, and surfaces to the caller
-        // immediately as a clear, distinct failure rather than a generic upstream error.
+        // This API's stated goal is a *correct* balance for a given date, which rules out
+        // using the partial data even though it's real: internal-transaction rows feed a
+        // signed sum (+ for incoming, - for outgoing), and a partial result could be
+        // missing rows from either side. Missing incoming rows understates the balance;
+        // missing outgoing rows overstates it. Either way, "use what we got" doesn't move
+        // the result closer to correct, it just produces a *different* wrong number --
+        // and an overstated balance is arguably worse than the obviously-impossible
+        // negative one this bug originally produced, since it wouldn't visibly signal
+        // that anything was wrong. So this fails clearly instead, without touching
+        // $allRows or trying to salvage the partial rows: there's no point processing
+        // data that's about to be discarded regardless.
         if (isset($decoded['status']) && $decoded['status'] === '2') {
             return self::ERROR_NOT_YET_INDEXED;
         }

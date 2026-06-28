@@ -115,10 +115,10 @@ there's currently no second provider to fall back to for Base specifically.
 While testing a real Base wallet, native ETH and a few token balances came back negative —
 impossible, since a wallet can't spend more than it ever received. The actual cause: Blockscout's
 internal-transactions endpoint can return `{"status":"2","message":"Some internal transactions
-within this block range have not yet been processed","result":[]}` for a block range that hasn't
-finished indexing yet. That's a meaningfully different signal from `status: "0"` ("this address
-genuinely has no internal transactions"), but the code only ever checked for `status === "0"`, so
-a `status: "2"` response fell through and was treated as a normal, successful, empty result.
+within this block range have not yet been processed",...}` for a block range that hasn't finished
+indexing yet. That's a meaningfully different signal from `status: "0"` ("this address genuinely
+has no internal transactions"), but the code only ever checked for `status === "0"`, so a
+`status: "2"` response fell through and was treated as a normal, successful, empty result.
 
 That's a serious bug, not a cosmetic one: once a block range is synced, `WalletSyncService` marks
 it complete and never re-fetches it. Any real incoming internal transfers in a range that returned
@@ -126,18 +126,32 @@ it complete and never re-fetches it. Any real incoming internal transfers in a r
 exactly what produces an impossible negative balance (real ETH spent, but some real ETH received
 never counted).
 
-Internal-transaction indexing on Blockscout is documented as its slowest indexer stage, often
-lagging well behind regular block/transaction indexing. The natural instinct is to retry after a
-short delay, the same way other transient errors here are handled — but testing the exact same
-request directly showed it returning `status: "2"` *consistently*, not intermittently, for the
-same block range. So `status: "2"` (`EtherscanCompatibleClient::ERROR_NOT_YET_INDEXED`) is
-deliberately **not** retried: it fails immediately with a clear `503`, distinct from a generic
-upstream error, rather than burning through the retry budget on something that won't clear up
-quickly.
+### Why the fix doesn't try to "use what data is available"
 
-If you see this `503`, the practical next step is to wait and retry the whole request later, once
-Blockscout's indexer has actually caught up for that range — there's no faster fix available from
-this codebase's side.
+Direct testing showed `status: "2"` can come back two ways: with an empty `result`, or with real,
+non-empty partial data alongside the same warning (confirmed against an unrelated, heavily-used
+contract address, so this isn't specific to one wallet). The instinct is to use that partial data
+rather than discard it — it's real, after all. That instinct doesn't actually hold up under what
+this API needs: internal-transaction rows feed directly into a *signed sum* (positive for
+incoming, negative for outgoing), and a partial result can be missing rows from either side.
+Missing incoming rows understates the balance; missing outgoing rows overstates it. Either way,
+using the partial data doesn't move the result *closer* to correct — it just produces a
+*different* wrong number, and an overstated balance is arguably worse than the original
+impossible-negative bug, since it wouldn't visibly signal that anything was wrong.
+
+Retrying within the same request doesn't help either: testing the exact same call twice, on two
+unrelated wallets, showed `status: "2"` reproducing consistently for the same block range, not
+intermittently — this appears to be a known, possibly long-lived characteristic of Blockscout's
+legacy API (its own per-transaction status is literally "Awaiting internal transactions for
+status", and the same behavior has been reported as far back as 2021 and is still being discussed
+in current Blockscout API migration threads).
+
+Given the API's purpose is a *correct* balance for a given date, `status: "2"`
+(`EtherscanCompatibleClient::ERROR_NOT_YET_INDEXED`) is therefore treated as a hard failure: no
+retry, and no holdings returned, rather than risk a number that looks plausible but might not be
+right. There's no reliable wait time to suggest, since this has been observed to persist rather
+than resolve quickly — if you hit this `503`, that specific wallet's history on that network
+currently can't be fully verified through this codebase.
 
 ## Why Polygon and BNB aren't active yet
 
