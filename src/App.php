@@ -211,6 +211,11 @@ class App
             'holdings' => $holdingsByNetwork
         ]);
     }
+
+    /**
+     * @return array{0: int, 1: array<string, mixed>}
+     */
+    private function buildSyncErrorResponse(string $errorCode, string $network, EtherscanCompatibleClient $client): array
     {
         if ($errorCode === EtherscanCompatibleClient::ERROR_INVALID_ADDRESS) {
             return [400, ['message' => 'Invalid wallet address']];
