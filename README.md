@@ -25,12 +25,15 @@ reuses what's already cached and only fetches the gap, if any.
 
 ## Endpoints
 
-* `GET /holdings/{address}` - Holdings across all active networks, as of today (UTC).
-* `GET /holdings/{address}?date=YYYY-MM-DD` - Holdings as of the end of the given UTC day.
+* `GET /holdings/{address}` - Historical holdings across active networks, as of today (UTC).
+* `GET /holdings/{address}?date=YYYY-MM-DD` - Historical holdings as of the end of the given UTC day.
+* `GET /holdings-now/{address}` - **Current** holdings right now, queried directly from upstream
+  rather than reconstructed from transaction history. Covers Ethereum and Base. No caching — each
+  call hits the upstream providers live. Use this when you need the wallet's live state; use
+  `/holdings/{address}` when you need a historical date.
 * `GET /openapi` - Interactive API documentation (Swagger UI).
 
-`{address}` must be a `0x`-prefixed, 40-hex-character EVM address (the same address format works
-identically across every network, since they're all EVM-compatible).
+`{address}` must be a `0x`-prefixed, 40-hex-character EVM address.
 
 ### Example
 

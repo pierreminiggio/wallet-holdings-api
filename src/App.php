@@ -9,6 +9,7 @@ use PierreMiniggio\DatabaseFetcher\Exception\DatabaseFetcherException;
 class App
 {
     private const HOLDINGS_ENDPOINT = 'holdings';
+    private const HOLDINGS_NOW_ENDPOINT = 'holdings-now';
     private const OPENAPI_ENDPOINT = 'openapi';
 
     public function run(string $path, ?string $queryParameters): void
@@ -23,6 +24,14 @@ class App
             return;
         }
 
+        $segments = explode('/', $trimmedPath);
+
+        if (count($segments) === 2 && $segments[0] === self::HOLDINGS_NOW_ENDPOINT) {
+            $this->handleHoldingsNow($segments[1]);
+
+            return;
+        }
+
         // A first-ever sync for a wallet can involve many sequential upstream calls across
         // 4 networks (each with its own short per-call timeout and a possible retry), which
         // can add up to longer than PHP's default execution time limit. Since this work is
@@ -30,8 +39,6 @@ class App
         // that a first sync may take a while, the time limit is removed for this endpoint
         // specifically rather than raised globally for every PHP script on the server.
         set_time_limit(0);
-
-        $segments = explode('/', $trimmedPath);
 
         if (count($segments) !== 2 || $segments[0] !== self::HOLDINGS_ENDPOINT) {
             http_response_code(404);
@@ -117,10 +124,93 @@ class App
         ]);
     }
 
-    /**
-     * @return array{0: int, 1: array<string, mixed>}
-     */
-    private function buildSyncErrorResponse(string $errorCode, string $network, EtherscanCompatibleClient $client): array
+    private function handleHoldingsNow(string $address): void
+    {
+        if (! $this->isValidAddress($address)) {
+            http_response_code(400);
+            echo json_encode(['message' => 'Invalid wallet address']);
+
+            return;
+        }
+
+        $calculator = new HoldingsCalculator();
+        $today = gmdate('Y-m-d');
+        $holdingsByNetwork = [];
+
+        // Ethereum: Routescan native balance + all token balances, both free and keyless.
+        $routescanClient = new RoutescanCurrentBalanceClient();
+        $chainId = Network::chainId(Network::ETHEREUM);
+
+        $nativeWei = $routescanClient->getNativeBalance($chainId, $address);
+        $tokenBalances = $routescanClient->getTokenBalances($chainId, $address);
+
+        if ($nativeWei === null || $tokenBalances === null) {
+            http_response_code(502);
+            echo json_encode(['message' => 'Could not retrieve current Ethereum balance from upstream']);
+
+            return;
+        }
+
+        $tokens = [];
+
+        foreach ($tokenBalances as $token) {
+            $tokens[] = [
+                'symbol' => $token['symbol'],
+                'contract' => $token['contract'],
+                'amount' => $calculator->toHumanAmount($token['balance'], $token['decimals'])
+            ];
+        }
+
+        $holdingsByNetwork[Network::ETHEREUM] = [
+            'native' => [
+                'symbol' => Network::nativeSymbol(Network::ETHEREUM, $today),
+                'amount' => $calculator->toHumanAmount($nativeWei, 18)
+            ],
+            'tokens' => $tokens
+        ];
+
+        // Base: Blockscout v2 native balance + all token balances, keyless.
+        // This deliberately uses a direct current-balance query rather than the historical
+        // transaction-replay approach used by /holdings/{address}?date=..., which fails on
+        // Base due to Blockscout's legacy API returning status:2 ("not yet indexed") for
+        // internal transactions that feed the signed-sum balance reconstruction.
+        $blockscoutClient = new BlockscoutCurrentBalanceClient();
+
+        $baseNativeWei = $blockscoutClient->getNativeBalance($address);
+        $baseTokenBalances = $blockscoutClient->getTokenBalances($address);
+
+        if ($baseNativeWei === null || $baseTokenBalances === null) {
+            http_response_code(502);
+            echo json_encode(['message' => 'Could not retrieve current Base balance from upstream']);
+
+            return;
+        }
+
+        $baseTokens = [];
+
+        foreach ($baseTokenBalances as $token) {
+            $baseTokens[] = [
+                'symbol' => $token['symbol'],
+                'contract' => $token['contract'],
+                'amount' => $calculator->toHumanAmount($token['balance'], $token['decimals'])
+            ];
+        }
+
+        $holdingsByNetwork[Network::BASE] = [
+            'native' => [
+                'symbol' => Network::nativeSymbol(Network::BASE, $today),
+                'amount' => $calculator->toHumanAmount($baseNativeWei, 18)
+            ],
+            'tokens' => $baseTokens
+        ];
+
+        http_response_code(200);
+        echo json_encode([
+            'address' => $address,
+            'as_of' => $today,
+            'holdings' => $holdingsByNetwork
+        ]);
+    }
     {
         if ($errorCode === EtherscanCompatibleClient::ERROR_INVALID_ADDRESS) {
             return [400, ['message' => 'Invalid wallet address']];
@@ -383,10 +473,75 @@ class App
                             ]
                         ]
                     ]
+                ],
+                '/' . self::HOLDINGS_NOW_ENDPOINT . '/{address}' => [
+                    'get' => [
+                        'summary' => 'Get a wallet\'s current holdings across all supported networks, right now',
+                        'description' => 'Returns live, directly-queried current balances rather than '
+                            . 'reconstructing them from transaction history. This sidesteps the '
+                            . 'internal-transaction indexing gap on Blockscout\'s legacy API that '
+                            . 'prevents /holdings/{address}?date=... from working reliably on Base. '
+                            . 'Trade-off: this can only ever answer "what does this wallet hold right '
+                            . 'now" -- not "what did it hold on a past date". No caching or DB '
+                            . 'involved: each call hits the upstream providers directly.',
+                        'parameters' => [
+                            [
+                                'name' => 'address',
+                                'in' => 'path',
+                                'required' => true,
+                                'schema' => ['type' => 'string'],
+                                'description' => 'A 0x-prefixed 40-hex-character EVM wallet address.'
+                            ]
+                        ],
+                        'responses' => [
+                            '200' => [
+                                'description' => 'Current holdings per network',
+                                'content' => [
+                                    'application/json' => [
+                                        'schema' => ['$ref' => '#/components/schemas/CurrentHoldingsResult']
+                                    ]
+                                ]
+                            ],
+                            '400' => [
+                                'description' => 'Invalid address',
+                                'content' => [
+                                    'application/json' => ['schema' => ['$ref' => '#/components/schemas/Error']]
+                                ]
+                            ],
+                            '502' => [
+                                'description' => 'Could not retrieve balance from an upstream source',
+                                'content' => [
+                                    'application/json' => ['schema' => ['$ref' => '#/components/schemas/Error']]
+                                ]
+                            ]
+                        ]
+                    ]
                 ]
             ],
             'components' => [
                 'schemas' => [
+                    'CurrentHoldingsResult' => [
+                        'type' => 'object',
+                        'properties' => [
+                            'address' => ['type' => 'string', 'example' => '0x1234...'],
+                            'as_of' => [
+                                'type' => 'string',
+                                'format' => 'date',
+                                'example' => '2026-06-28',
+                                'description' => 'UTC date the query was made. Not a guaranteed settlement '
+                                    . 'date -- balances reflect the upstream provider\'s live state at '
+                                    . 'the time of the call.'
+                            ],
+                            'holdings' => [
+                                'type' => 'object',
+                                'description' => 'Keyed by network: ethereum and base.',
+                                'properties' => [
+                                    'ethereum' => ['$ref' => '#/components/schemas/NetworkHoldings'],
+                                    'base' => ['$ref' => '#/components/schemas/NetworkHoldings']
+                                ]
+                            ]
+                        ]
+                    ],
                     'HoldingsResult' => [
                         'type' => 'object',
                         'properties' => [
