@@ -14,5 +14,10 @@ return [
         // even though Routescan works fine for most wallets). Leave blank to disable the
         // fallback entirely -- a persistent Routescan failure will then surface as-is.
         'api_key' => ''
+    ],
+    'zerion' => [
+        // Required for /holdings-now. Free tier: 2,000 requests/day, no credit card.
+        // Register at: https://dashboard.zerion.io/
+        'api_key' => ''
     ]
 ];

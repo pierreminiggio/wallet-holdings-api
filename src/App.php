@@ -133,83 +133,97 @@ class App
             return;
         }
 
-        $calculator = new HoldingsCalculator();
-        $today = gmdate('Y-m-d');
-        $holdingsByNetwork = [];
+        $config = $this->loadConfig();
+        $zerionApiKey = $config['zerion']['api_key'] ?? '';
 
-        // Ethereum: Routescan native balance + all token balances, both free and keyless.
-        $routescanClient = new RoutescanCurrentBalanceClient();
-        $chainId = Network::chainId(Network::ETHEREUM);
-
-        $nativeWei = $routescanClient->getNativeBalance($chainId, $address);
-        $tokenBalances = $routescanClient->getTokenBalances($chainId, $address);
-
-        if ($nativeWei === null || $tokenBalances === null) {
-            http_response_code(502);
-            echo json_encode(['message' => 'Could not retrieve current Ethereum balance from upstream']);
+        if ($zerionApiKey === '') {
+            http_response_code(503);
+            echo json_encode(['message' => 'This endpoint requires a Zerion API key. '
+                . 'Register for free at https://dashboard.zerion.io/ and add it to config.php '
+                . 'under zerion.api_key.']);
 
             return;
         }
 
-        $tokens = [];
+        $client = new ZerionClient($zerionApiKey);
 
-        foreach ($tokenBalances as $token) {
-            $tokens[] = [
-                'symbol' => $token['symbol'],
-                'contract' => $token['contract'],
-                'amount' => $calculator->toHumanAmount($token['balance'], $token['decimals'])
-            ];
-        }
+        $walletPositions = $client->getWalletPositions($address);
 
-        $holdingsByNetwork[Network::ETHEREUM] = [
-            'native' => [
-                'symbol' => Network::nativeSymbol(Network::ETHEREUM, $today),
-                'amount' => $calculator->toHumanAmount($nativeWei, 18)
-            ],
-            'tokens' => $tokens
-        ];
-
-        // Base: Blockscout v2 native balance + all token balances, keyless.
-        // This deliberately uses a direct current-balance query rather than the historical
-        // transaction-replay approach used by /holdings/{address}?date=..., which fails on
-        // Base due to Blockscout's legacy API returning status:2 ("not yet indexed") for
-        // internal transactions that feed the signed-sum balance reconstruction.
-        $blockscoutClient = new BlockscoutCurrentBalanceClient();
-
-        $baseNativeWei = $blockscoutClient->getNativeBalance($address);
-        $baseTokenBalances = $blockscoutClient->getTokenBalances($address);
-
-        if ($baseNativeWei === null || $baseTokenBalances === null) {
-            http_response_code(502);
-            echo json_encode(['message' => 'Could not retrieve current Base balance from upstream']);
+        if (is_string($walletPositions)) {
+            [$statusCode, $body] = $this->buildZerionErrorResponse($walletPositions);
+            http_response_code($statusCode);
+            echo json_encode($body);
 
             return;
         }
 
-        $baseTokens = [];
+        $defiPositions = $client->getDefiPositions($address);
 
-        foreach ($baseTokenBalances as $token) {
-            $baseTokens[] = [
-                'symbol' => $token['symbol'],
-                'contract' => $token['contract'],
-                'amount' => $calculator->toHumanAmount($token['balance'], $token['decimals'])
-            ];
+        if (is_string($defiPositions)) {
+            [$statusCode, $body] = $this->buildZerionErrorResponse($defiPositions);
+            http_response_code($statusCode);
+            echo json_encode($body);
+
+            return;
         }
 
-        $holdingsByNetwork[Network::BASE] = [
-            'native' => [
-                'symbol' => Network::nativeSymbol(Network::BASE, $today),
-                'amount' => $calculator->toHumanAmount($baseNativeWei, 18)
-            ],
-            'tokens' => $baseTokens
-        ];
+        // Merge wallet and DeFi positions, then group by chain.
+        $allPositions = [...$walletPositions, ...$defiPositions];
+        $byChain = [];
+
+        foreach ($allPositions as $position) {
+            $chain = $position->chainId;
+
+            if (! isset($byChain[$chain])) {
+                $byChain[$chain] = ['native' => null, 'tokens' => [], 'defi' => []];
+            }
+
+            if ($position->isNative) {
+                $byChain[$chain]['native'] = [
+                    'symbol' => $position->symbol,
+                    'amount' => $position->amount
+                ];
+            } elseif ($position->positionType === 'wallet') {
+                $byChain[$chain]['tokens'][] = [
+                    'symbol' => $position->symbol,
+                    'contract' => $position->contractAddress,
+                    'amount' => $position->amount
+                ];
+            } else {
+                $byChain[$chain]['defi'][] = [
+                    'symbol' => $position->symbol,
+                    'contract' => $position->contractAddress,
+                    'amount' => $position->amount,
+                    'type' => $position->positionType,
+                    'protocol' => $position->protocolId
+                ];
+            }
+        }
 
         http_response_code(200);
         echo json_encode([
             'address' => $address,
-            'as_of' => $today,
-            'holdings' => $holdingsByNetwork
+            'as_of' => gmdate('Y-m-d'),
+            'holdings' => $byChain
         ]);
+    }
+
+    /**
+     * @return array{0: int, 1: array<string, mixed>}
+     */
+    private function buildZerionErrorResponse(string $errorCode): array
+    {
+        if ($errorCode === ZerionClient::ERROR_RATE_LIMITED) {
+            return [503, ['message' => 'Rate limited by Zerion. '
+                . 'The free tier allows 2,000 requests/day -- retry after a moment.']];
+        }
+
+        if ($errorCode === ZerionClient::ERROR_UNAUTHORIZED) {
+            return [503, ['message' => 'Zerion API key is invalid or expired. '
+                . 'Check the zerion.api_key value in config.php.']];
+        }
+
+        return [502, ['message' => 'Could not retrieve portfolio data from Zerion.']];
     }
 
     /**
@@ -481,14 +495,14 @@ class App
                 ],
                 '/' . self::HOLDINGS_NOW_ENDPOINT . '/{address}' => [
                     'get' => [
-                        'summary' => 'Get a wallet\'s current holdings across all supported networks, right now',
-                        'description' => 'Returns live, directly-queried current balances rather than '
-                            . 'reconstructing them from transaction history. This sidesteps the '
-                            . 'internal-transaction indexing gap on Blockscout\'s legacy API that '
-                            . 'prevents /holdings/{address}?date=... from working reliably on Base. '
-                            . 'Trade-off: this can only ever answer "what does this wallet hold right '
-                            . 'now" -- not "what did it hold on a past date". No caching or DB '
-                            . 'involved: each call hits the upstream providers directly.',
+                        'summary' => 'Get a wallet\'s current holdings and DeFi positions across all chains, right now',
+                        'description' => 'Returns live, directly-queried current balances from Zerion\'s '
+                            . 'portfolio API, covering 60+ chains simultaneously in two calls (wallet tokens '
+                            . 'and DeFi positions). Includes native coins, ERC-20 tokens, and protocol '
+                            . 'positions (Aave deposits show as aTokens in wallet holdings; LP shares, '
+                            . 'staked positions, and locked assets appear in the defi section). Requires a '
+                            . 'Zerion API key in config.php (free tier: 2,000 requests/day). '
+                            . 'Trade-off: current state only -- no historical date support.',
                         'parameters' => [
                             [
                                 'name' => 'address',
@@ -500,7 +514,7 @@ class App
                         ],
                         'responses' => [
                             '200' => [
-                                'description' => 'Current holdings per network',
+                                'description' => 'Current holdings grouped by chain',
                                 'content' => [
                                     'application/json' => [
                                         'schema' => ['$ref' => '#/components/schemas/CurrentHoldingsResult']
@@ -514,7 +528,13 @@ class App
                                 ]
                             ],
                             '502' => [
-                                'description' => 'Could not retrieve balance from an upstream source',
+                                'description' => 'Could not retrieve portfolio data from Zerion',
+                                'content' => [
+                                    'application/json' => ['schema' => ['$ref' => '#/components/schemas/Error']]
+                                ]
+                            ],
+                            '503' => [
+                                'description' => 'Zerion API key missing, invalid, or rate-limited',
                                 'content' => [
                                     'application/json' => ['schema' => ['$ref' => '#/components/schemas/Error']]
                                 ]
@@ -533,16 +553,52 @@ class App
                                 'type' => 'string',
                                 'format' => 'date',
                                 'example' => '2026-06-28',
-                                'description' => 'UTC date the query was made. Not a guaranteed settlement '
-                                    . 'date -- balances reflect the upstream provider\'s live state at '
-                                    . 'the time of the call.'
+                                'description' => 'UTC date the query was made.'
                             ],
                             'holdings' => [
                                 'type' => 'object',
-                                'description' => 'Keyed by network: ethereum and base.',
-                                'properties' => [
-                                    'ethereum' => ['$ref' => '#/components/schemas/NetworkHoldings'],
-                                    'base' => ['$ref' => '#/components/schemas/NetworkHoldings']
+                                'description' => 'Keyed by Zerion chain ID (e.g. "ethereum", "base", '
+                                    . '"polygon", "binance-smart-chain"). Only chains where this wallet '
+                                    . 'has a non-zero position appear.',
+                                'additionalProperties' => [
+                                    'type' => 'object',
+                                    'properties' => [
+                                        'native' => [
+                                            'type' => 'object',
+                                            'nullable' => true,
+                                            'properties' => [
+                                                'symbol' => ['type' => 'string', 'example' => 'ETH'],
+                                                'amount' => ['type' => 'string', 'example' => '0.023489']
+                                            ]
+                                        ],
+                                        'tokens' => [
+                                            'type' => 'array',
+                                            'items' => [
+                                                'type' => 'object',
+                                                'properties' => [
+                                                    'symbol' => ['type' => 'string', 'example' => 'USDC'],
+                                                    'contract' => ['type' => 'string', 'example' => '0xa0b8...'],
+                                                    'amount' => ['type' => 'string', 'example' => '500.0']
+                                                ]
+                                            ]
+                                        ],
+                                        'defi' => [
+                                            'type' => 'array',
+                                            'description' => 'DeFi protocol positions (staked, locked, LP, etc.). '
+                                                . 'Aave/Compound deposits typically appear as aTokens in '
+                                                . 'the tokens array rather than here.',
+                                            'items' => [
+                                                'type' => 'object',
+                                                'properties' => [
+                                                    'symbol' => ['type' => 'string', 'example' => 'ETH'],
+                                                    'contract' => ['type' => 'string', 'nullable' => true],
+                                                    'amount' => ['type' => 'string', 'example' => '1.5'],
+                                                    'type' => ['type' => 'string', 'example' => 'staked'],
+                                                    'protocol' => ['type' => 'string', 'nullable' => true, 'example' => 'lido']
+                                                ]
+                                            ]
+                                        ]
+                                    ]
                                 ]
                             ]
                         ]

@@ -27,10 +27,12 @@ reuses what's already cached and only fetches the gap, if any.
 
 * `GET /holdings/{address}` - Historical holdings across active networks, as of today (UTC).
 * `GET /holdings/{address}?date=YYYY-MM-DD` - Historical holdings as of the end of the given UTC day.
-* `GET /holdings-now/{address}` - **Current** holdings right now, queried directly from upstream
-  rather than reconstructed from transaction history. Covers Ethereum and Base. No caching — each
-  call hits the upstream providers live. Use this when you need the wallet's live state; use
-  `/holdings/{address}` when you need a historical date.
+* `GET /holdings-now/{address}` - **Current** holdings and DeFi positions right now, powered by
+  Zerion's portfolio API. Covers 60+ chains simultaneously (Ethereum, Base, Polygon, BNB, Avalanche
+  and more) in two calls — wallet tokens/native coins in one, DeFi protocol positions in the other.
+  No caching — each call goes live to Zerion. Requires a Zerion API key in `config.php` (free tier:
+  2,000 requests/day, no credit card — register at [dashboard.zerion.io](https://dashboard.zerion.io/)).
+  Use this for current state; use `/holdings/{address}` when you need a historical date.
 * `GET /openapi` - Interactive API documentation (Swagger UI).
 
 `{address}` must be a `0x`-prefixed, 40-hex-character EVM address.
@@ -193,10 +195,13 @@ based on documentation or a web page — the same process that worked for Base:
    `etherscan.api_key` in `config.php`. This is used as a fallback when Routescan persistently
    fails for a specific wallet — see below for why that's a real, observed scenario, not just a
    theoretical one. Leave it blank to skip the fallback entirely.
-4. Ensure the `bcmath` PHP extension is enabled (used throughout for precise arbitrary-size
+4. (Required for `/holdings-now`) Register a free Zerion API key at
+   [dashboard.zerion.io](https://dashboard.zerion.io/) (no credit card, 2,000 requests/day free)
+   and set it as `zerion.api_key` in `config.php`. Without this, `/holdings-now` returns a `503`.
+5. Ensure the `bcmath` PHP extension is enabled (used throughout for precise arbitrary-size
    integer arithmetic on wei-level amounts, which exceed native PHP int/float precision)
-5. Run the migration below on your database
-6. Point your webserver's document root to `public/`, or use the provided `.htaccess` with Apache
+6. Run the migration below on your database
+7. Point your webserver's document root to `public/`, or use the provided `.htaccess` with Apache
 
 ## Migration
 
