@@ -19,5 +19,12 @@ return [
         // Required for /holdings-now. Free tier: 2,000 requests/day, no credit card.
         // Register at: https://dashboard.zerion.io/
         'api_key' => ''
+    ],
+    'github' => [
+        // Required for /sui-holdings-now. A GitHub personal access token with permission
+        // to trigger workflow runs and read Actions artifacts on
+        // pierreminiggio/sui-navi-report. Without this, /sui-holdings-now returns a 503
+        // (unless a fresh-enough cached result already exists for the requested address).
+        'token' => ''
     ]
 ];

@@ -10,6 +10,7 @@ class App
 {
     private const HOLDINGS_ENDPOINT = 'holdings';
     private const HOLDINGS_NOW_ENDPOINT = 'holdings-now';
+    private const SUI_HOLDINGS_NOW_ENDPOINT = 'sui-holdings-now';
     private const OPENAPI_ENDPOINT = 'openapi';
 
     public function run(string $path, ?string $queryParameters): void
@@ -28,6 +29,12 @@ class App
 
         if (count($segments) === 2 && $segments[0] === self::HOLDINGS_NOW_ENDPOINT) {
             $this->handleHoldingsNow($segments[1]);
+
+            return;
+        }
+
+        if (count($segments) === 2 && $segments[0] === self::SUI_HOLDINGS_NOW_ENDPOINT) {
+            $this->handleSuiHoldingsNow($segments[1]);
 
             return;
         }
@@ -206,6 +213,89 @@ class App
             'as_of' => gmdate('Y-m-d'),
             'holdings' => $byChain
         ]);
+    }
+
+    private function handleSuiHoldingsNow(string $address): void
+    {
+        if (! $this->isValidSuiAddress($address)) {
+            http_response_code(400);
+            echo json_encode(['message' => 'Invalid SUI wallet address -- expected a 0x-prefixed, '
+                . '64-hex-character address.']);
+
+            return;
+        }
+
+        $config = $this->loadConfig();
+        $fetcher = $this->createDatabaseFetcher($config);
+        $cacheRepository = new SuiHoldingsCacheRepository($fetcher);
+
+        $cached = $cacheRepository->getFreshCache($address);
+
+        if ($cached !== null) {
+            http_response_code(200);
+            echo $cached['reportJson'];
+
+            return;
+        }
+
+        $githubToken = $config['github']['token'] ?? '';
+
+        if ($githubToken === '') {
+            http_response_code(503);
+            echo json_encode(['message' => 'This endpoint requires a GitHub token with permission to '
+                . 'trigger and read Actions runs/artifacts on pierreminiggio/sui-navi-report. Set it as '
+                . 'github.token in config.php.']);
+
+            return;
+        }
+
+        // Triggering and waiting on a live GitHub Actions run (polled every 30s until it
+        // finishes) can legitimately take longer than PHP's default execution time limit,
+        // so it's removed for this endpoint specifically -- the same reasoning as
+        // App::run()'s set_time_limit(0) call for /holdings.
+        set_time_limit(0);
+
+        $actionClient = new SuiWalletReportActionClient($githubToken);
+        $report = $actionClient->fetchReport($address);
+
+        if (is_string($report)) {
+            [$statusCode, $body] = $this->buildSuiActionErrorResponse($report);
+            http_response_code($statusCode);
+            echo json_encode($body);
+
+            return;
+        }
+
+        $reportJson = json_encode($report, JSON_UNESCAPED_SLASHES);
+
+        $cacheRepository->store($address, $reportJson);
+
+        http_response_code(200);
+        echo $reportJson;
+    }
+
+    /**
+     * @return array{0: int, 1: array<string, mixed>}
+     */
+    private function buildSuiActionErrorResponse(string $errorCode): array
+    {
+        if ($errorCode === SuiWalletReportActionClient::ERROR_NO_ARTIFACT) {
+            return [502, ['message' => 'The sui-navi-report GitHub Action run completed but produced no '
+                . 'wallet-report.json artifact to read.']];
+        }
+
+        if ($errorCode === SuiWalletReportActionClient::ERROR_INVALID_JSON) {
+            return [502, ['message' => 'The wallet-report.json artifact from the sui-navi-report GitHub '
+                . 'Action was not valid JSON.']];
+        }
+
+        return [502, ['message' => 'Could not run the sui-navi-report GitHub Action for this address. '
+            . 'See the server log for details.']];
+    }
+
+    private function isValidSuiAddress(string $address): bool
+    {
+        return (bool) preg_match('/^0x[a-fA-F0-9]{64}$/', $address);
     }
 
     /**
@@ -442,6 +532,49 @@ class App
                 'version' => '1.0.0'
             ],
             'paths' => [
+                '/' . self::SUI_HOLDINGS_NOW_ENDPOINT . '/{address}' => [
+                    'get' => [
+                        'summary' => 'Get a SUI wallet\'s current coin holdings and NAVI Protocol positions',
+                        'description' => 'Serves a cached snapshot if one younger than 2 hours exists; '
+                            . 'otherwise triggers a live pierreminiggio/sui-navi-report GitHub Action run '
+                            . '(which can take up to a minute or so) and caches the result.',
+                        'parameters' => [
+                            [
+                                'name' => 'address',
+                                'in' => 'path',
+                                'required' => true,
+                                'schema' => ['type' => 'string'],
+                                'description' => 'A 0x-prefixed, 64-hex-character SUI wallet address.'
+                            ]
+                        ],
+                        'responses' => [
+                            '200' => [
+                                'description' => 'Wallet coin holdings and NAVI positions/health factor '
+                                    . '(cached or freshly fetched) -- see the sui-navi-report project\'s '
+                                    . 'own README for the exact schema.',
+                                'content' => ['application/json' => ['schema' => ['type' => 'object']]]
+                            ],
+                            '400' => [
+                                'description' => 'Invalid address',
+                                'content' => [
+                                    'application/json' => ['schema' => ['$ref' => '#/components/schemas/Error']]
+                                ]
+                            ],
+                            '502' => [
+                                'description' => 'The GitHub Action run failed, or produced no/invalid artifact',
+                                'content' => [
+                                    'application/json' => ['schema' => ['$ref' => '#/components/schemas/Error']]
+                                ]
+                            ],
+                            '503' => [
+                                'description' => 'GitHub token missing',
+                                'content' => [
+                                    'application/json' => ['schema' => ['$ref' => '#/components/schemas/Error']]
+                                ]
+                            ]
+                        ]
+                    ]
+                ],
                 '/' . self::HOLDINGS_ENDPOINT . '/{address}' => [
                     'get' => [
                         'summary' => 'Get a wallet\'s holdings across all supported networks on a given date',
