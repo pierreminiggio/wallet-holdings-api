@@ -59,7 +59,50 @@ class SuiHoldingsCacheRepository
         return $latest;
     }
 
+    /**
+     * Returns the most recently cached report for this address whose cached_at falls
+     * within the given UTC calendar day (inclusive of both ends), or null if no cached
+     * snapshot exists for that day. "Most recent within the day" is picked in PHP for
+     * the same reason as getFreshCache() above: no confirmed SQL ORDER BY/LIMIT support
+     * in the query builder used here.
+     *
+     * @return array{reportJson: string, cachedAt: int}|null
+     */
+    public function getCacheForDate(string $address, string $date): ?array
+    {
+        $dayStart = \DateTime::createFromFormat('Y-m-d H:i:s', $date . ' 00:00:00', new \DateTimeZone('UTC'))
+            ->getTimestamp();
+        $dayEnd = \DateTime::createFromFormat('Y-m-d H:i:s', $date . ' 23:59:59', new \DateTimeZone('UTC'))
+            ->getTimestamp();
+
+        $rows = $this->fetcher->query(
+            $this->fetcher
+                ->createQuery(self::TABLE)
+                ->select('report_json, cached_at')
+                ->where('address = :address')
+            ,
+            ['address' => $address]
+        );
+
+        $latest = null;
+
+        foreach ($rows as $row) {
+            $cachedAt = (int) $row['cached_at'];
+
+            if ($cachedAt < $dayStart || $cachedAt > $dayEnd) {
+                continue;
+            }
+
+            if ($latest === null || $cachedAt > $latest['cachedAt']) {
+                $latest = ['reportJson' => $row['report_json'], 'cachedAt' => $cachedAt];
+            }
+        }
+
+        return $latest;
+    }
+
     public function store(string $address, string $reportJson): void
+
     {
         $this->fetcher->exec(
             $this->fetcher

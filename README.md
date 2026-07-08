@@ -44,6 +44,11 @@ reuses what's already cached and only fetches the gap, if any.
   `config.php` under `github.token` with permission to trigger workflow runs and read
   Actions artifacts on that repo. See that project's own README for the response schema
   (`wallet.coins[]`, `navi.positions[]`, `navi.healthFactor`).
+* `GET /sui-holdings/{address}?date=YYYY-MM-DD` - Read-only lookup of an **already-cached**
+  SUI snapshot. Returns the most recent `/sui-holdings-now` snapshot cached for that address
+  on the given UTC day (defaults to today, UTC, if `date` is omitted). Never triggers a fresh
+  GitHub Action run itself — if nothing was cached for that address on that day, it fails with
+  a `500` rather than silently returning a different day's data.
 * `GET /openapi` - Interactive API documentation (Swagger UI).
 
 `{address}` must be a `0x`-prefixed, 40-hex-character EVM address.
