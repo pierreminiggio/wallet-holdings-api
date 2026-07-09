@@ -10,6 +10,8 @@ class App
 {
     private const HOLDINGS_ENDPOINT = 'holdings';
     private const HOLDINGS_NOW_ENDPOINT = 'holdings-now';
+    private const SUI_HOLDINGS_NOW_ENDPOINT = 'sui-holdings-now';
+    private const SUI_HOLDINGS_ENDPOINT = 'sui-holdings';
     private const OPENAPI_ENDPOINT = 'openapi';
 
     public function run(string $path, ?string $queryParameters): void
@@ -28,6 +30,18 @@ class App
 
         if (count($segments) === 2 && $segments[0] === self::HOLDINGS_NOW_ENDPOINT) {
             $this->handleHoldingsNow($segments[1]);
+
+            return;
+        }
+
+        if (count($segments) === 2 && $segments[0] === self::SUI_HOLDINGS_NOW_ENDPOINT) {
+            $this->handleSuiHoldingsNow($segments[1]);
+
+            return;
+        }
+
+        if (count($segments) === 2 && $segments[0] === self::SUI_HOLDINGS_ENDPOINT) {
+            $this->handleSuiHoldingsForDate($segments[1], $queryParameters);
 
             return;
         }
@@ -321,6 +335,139 @@ class App
         return $byChain;
     }
 
+    private function handleSuiHoldingsNow(string $address): void
+    {
+        if (! $this->isValidSuiAddress($address)) {
+            http_response_code(400);
+            echo json_encode(['message' => 'Invalid SUI wallet address -- expected a 0x-prefixed, '
+                . '64-hex-character address.']);
+
+            return;
+        }
+
+        $config = $this->loadConfig();
+        $fetcher = $this->createDatabaseFetcher($config);
+        $cacheRepository = new SuiHoldingsCacheRepository($fetcher);
+
+        $cached = $cacheRepository->getFreshCache($address);
+
+        if ($cached !== null) {
+            http_response_code(200);
+            echo $cached['reportJson'];
+
+            return;
+        }
+
+        $githubToken = $config['github']['token'] ?? '';
+
+        if ($githubToken === '') {
+            http_response_code(503);
+            echo json_encode(['message' => 'This endpoint requires a GitHub token with permission to '
+                . 'trigger and read Actions runs/artifacts on pierreminiggio/sui-navi-report. Set it as '
+                . 'github.token in config.php.']);
+
+            return;
+        }
+
+        // Triggering and waiting on a live GitHub Actions run (polled every 30s until it
+        // finishes) can legitimately take longer than PHP's default execution time limit,
+        // so it's removed for this endpoint specifically -- the same reasoning as
+        // App::run()'s set_time_limit(0) call for /holdings.
+        set_time_limit(0);
+
+        $actionClient = new SuiWalletReportActionClient($githubToken);
+        $report = $actionClient->fetchReport($address);
+
+        if (is_string($report)) {
+            [$statusCode, $body] = $this->buildSuiActionErrorResponse($report);
+            http_response_code($statusCode);
+            echo json_encode($body);
+
+            return;
+        }
+
+        $reportJson = json_encode($report, JSON_UNESCAPED_SLASHES);
+
+        $cacheRepository->store($address, $reportJson);
+
+        http_response_code(200);
+        echo $reportJson;
+    }
+
+    /**
+     * Serves the most recent cached /sui-holdings-now snapshot for this address that
+     * falls within the given UTC calendar day. Unlike /sui-holdings-now, this endpoint
+     * never triggers a fresh GitHub Action run itself -- it only ever reads what's
+     * already been cached (by earlier /sui-holdings-now calls on that day), and fails
+     * loudly with a 500 if nothing was cached that day rather than silently falling
+     * back to a different day's snapshot.
+     */
+    private function handleSuiHoldingsForDate(string $address, ?string $queryParameters): void
+    {
+        if (! $this->isValidSuiAddress($address)) {
+            http_response_code(400);
+            echo json_encode(['message' => 'Invalid SUI wallet address -- expected a 0x-prefixed, '
+                . '64-hex-character address.']);
+
+            return;
+        }
+
+        $requestedDate = $this->getRequestedDate($queryParameters);
+
+        if ($requestedDate === false) {
+            http_response_code(400);
+            echo json_encode(['message' => 'date must be in YYYY-MM-DD format']);
+
+            return;
+        }
+
+        // No date given -> today (UTC), consistent with /holdings' own default.
+        $targetDate = $requestedDate ?? gmdate('Y-m-d');
+
+        $config = $this->loadConfig();
+        $fetcher = $this->createDatabaseFetcher($config);
+        $cacheRepository = new SuiHoldingsCacheRepository($fetcher);
+
+        $cached = $cacheRepository->getCacheForDate($address, $targetDate);
+
+        if ($cached === null) {
+            http_response_code(500);
+            echo json_encode(['message' => 'No cached SUI holdings snapshot exists for ' . $address
+                . ' on ' . $targetDate . '. This endpoint only serves snapshots already cached by '
+                . 'a prior /' . self::SUI_HOLDINGS_NOW_ENDPOINT . '/{address} call on that day -- it '
+                . 'never triggers a fresh fetch itself.']);
+
+            return;
+        }
+
+        http_response_code(200);
+        echo $cached['reportJson'];
+    }
+
+    /**
+     * @return array{0: int, 1: array<string, mixed>}
+     */
+    private function buildSuiActionErrorResponse(string $errorCode): array
+    {
+        if ($errorCode === SuiWalletReportActionClient::ERROR_NO_ARTIFACT) {
+            return [502, ['message' => 'The sui-navi-report GitHub Action run completed but produced no '
+                . 'wallet-report.json artifact to read.']];
+        }
+
+        if ($errorCode === SuiWalletReportActionClient::ERROR_INVALID_JSON) {
+            return [502, ['message' => 'The wallet-report.json artifact from the sui-navi-report GitHub '
+                . 'Action was not valid JSON.']];
+        }
+
+        return [502, ['message' => 'Could not run the sui-navi-report GitHub Action for this address. '
+            . 'See the server log for details.']];
+    }
+
+    private function isValidSuiAddress(string $address): bool
+    {
+        return (bool) preg_match('/^0x[a-fA-F0-9]{64}$/', $address);
+    }
+
     /**
      * @return array{0: int, 1: array<string, mixed>}
      */
@@ -555,6 +702,103 @@ class App
                 'version' => '1.0.0'
             ],
             'paths' => [
+                '/' . self::SUI_HOLDINGS_NOW_ENDPOINT . '/{address}' => [
+                    'get' => [
+                        'summary' => 'Get a SUI wallet\'s current coin holdings and NAVI Protocol positions',
+                        'description' => 'Serves a cached snapshot if one younger than 2 hours exists; '
+                            . 'otherwise triggers a live pierreminiggio/sui-navi-report GitHub Action run '
+                            . '(which can take up to a minute or so) and caches the result.',
+                        'parameters' => [
+                            [
+                                'name' => 'address',
+                                'in' => 'path',
+                                'required' => true,
+                                'schema' => ['type' => 'string'],
+                                'description' => 'A 0x-prefixed, 64-hex-character SUI wallet address.'
+                            ]
+                        ],
+                        'responses' => [
+                            '200' => [
+                                'description' => 'Wallet coin holdings and NAVI positions/health factor '
+                                    . '(cached or freshly fetched) -- see the sui-navi-report project\'s '
+                                    . 'own README for the exact schema.',
+                                'content' => ['application/json' => ['schema' => ['type' => 'object']]]
+                            ],
+                            '400' => [
+                                'description' => 'Invalid address',
+                                'content' => [
+                                    'application/json' => ['schema' => ['$ref' => '#/components/schemas/Error']]
+                                ]
+                            ],
+                            '502' => [
+                                'description' => 'The GitHub Action run failed, or produced no/invalid artifact',
+                                'content' => [
+                                    'application/json' => ['schema' => ['$ref' => '#/components/schemas/Error']]
+                                ]
+                            ],
+                            '503' => [
+                                'description' => 'GitHub token missing',
+                                'content' => [
+                                    'application/json' => ['schema' => ['$ref' => '#/components/schemas/Error']]
+                                ]
+                            ]
+                        ]
+                    ]
+                ],
+                '/' . self::SUI_HOLDINGS_ENDPOINT . '/{address}' => [
+                    'get' => [
+                        'summary' => 'Get the most recently cached SUI wallet snapshot for a given UTC day',
+                        'description' => 'Reads-only: returns the most recent snapshot already cached by a '
+                            . 'prior /' . self::SUI_HOLDINGS_NOW_ENDPOINT . '/{address} call that falls within '
+                            . 'the given UTC calendar day. Never triggers a fresh GitHub Action run itself -- '
+                            . 'if no snapshot was cached for that address on that day, this fails with a 500 '
+                            . 'rather than falling back to a different day\'s data or fetching a new one.',
+                        'parameters' => [
+                            [
+                                'name' => 'address',
+                                'in' => 'path',
+                                'required' => true,
+                                'schema' => ['type' => 'string'],
+                                'description' => 'A 0x-prefixed, 64-hex-character SUI wallet address.'
+                            ],
+                            [
+                                'name' => 'date',
+                                'in' => 'query',
+                                'required' => false,
+                                'schema' => ['type' => 'string', 'format' => 'date'],
+                                'description' => 'UTC calendar day (YYYY-MM-DD) to look up the most recent '
+                                    . 'cached snapshot for. Defaults to today (UTC) when omitted.'
+                            ]
+                        ],
+                        'responses' => [
+                            '200' => [
+                                'description' => 'The most recent cached snapshot from that day. Same shape '
+                                    . 'as /' . self::SUI_HOLDINGS_NOW_ENDPOINT . '/{address}\'s response -- '
+                                    . 'wallet.coins[], navi.positions[], navi.healthFactor -- with the '
+                                    . 'address and generatedAt fields reflecting when that snapshot was '
+                                    . 'originally fetched, not the time of this request.',
+                                'content' => [
+                                    'application/json' => [
+                                        'schema' => ['$ref' => '#/components/schemas/SuiHoldingsSnapshot']
+                                    ]
+                                ]
+                            ],
+                            '400' => [
+                                'description' => 'Invalid address, or date not in YYYY-MM-DD format',
+                                'content' => [
+                                    'application/json' => ['schema' => ['$ref' => '#/components/schemas/Error']]
+                                ]
+                            ],
+                            '500' => [
+                                'description' => 'No cached snapshot exists for this address on that '
+                                    . 'UTC day',
+                                'content' => [
+                                    'application/json' => ['schema' => ['$ref' => '#/components/schemas/Error']]
+                                ]
+                            ]
+                        ]
+                    ]
+                ],
                 '/' . self::HOLDINGS_ENDPOINT . '/{address}' => [
                     'get' => [
                         'summary' => 'Get a wallet\'s holdings across all supported networks on a given date',
@@ -658,6 +902,102 @@ class App
             ],
             'components' => [
                 'schemas' => [
+                    'SuiHoldingsSnapshot' => [
+                        'type' => 'object',
+                        'description' => 'A single cached wallet-report.json snapshot, exactly as produced '
+                            . 'by the pierreminiggio/sui-navi-report GitHub Action and stored verbatim -- '
+                            . 'see that project\'s own README for the authoritative schema.',
+                        'properties' => [
+                            'address' => [
+                                'type' => 'string',
+                                'example' => '0x77ffeb08306a95f2386467002c71b33e8022bb2ae98dd57ebcdf00d316fccbea',
+                                'description' => 'The SUI address this snapshot was generated for.'
+                            ],
+                            'generatedAt' => [
+                                'type' => 'string',
+                                'format' => 'date-time',
+                                'example' => '2026-07-08T21:45:56.730Z',
+                                'description' => 'UTC timestamp of when this snapshot was originally fetched '
+                                    . '(i.e. when the underlying GitHub Action ran), not when it was read.'
+                            ],
+                            'wallet' => [
+                                'type' => 'object',
+                                'properties' => [
+                                    'coins' => [
+                                        'type' => 'array',
+                                        'description' => 'Every coin/NFT type held directly in the wallet '
+                                            . '(as opposed to supplied/borrowed on NAVI).',
+                                        'items' => [
+                                            'type' => 'object',
+                                            'properties' => [
+                                                'coinType' => [
+                                                    'type' => 'string',
+                                                    'description' => 'Fully-qualified on-chain coin type.',
+                                                    'example' => '0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI'
+                                                ],
+                                                'symbol' => ['type' => 'string', 'example' => 'SUI'],
+                                                'name' => ['type' => 'string', 'example' => 'Sui'],
+                                                'decimals' => ['type' => 'integer', 'example' => 9],
+                                                'rawBalance' => [
+                                                    'type' => 'string',
+                                                    'description' => 'Raw on-chain integer balance, as a '
+                                                        . 'string (can exceed native integer precision).',
+                                                    'example' => '5117254324'
+                                                ],
+                                                'amount' => [
+                                                    'type' => 'number',
+                                                    'description' => 'Human-readable amount (rawBalance '
+                                                        . 'divided by 10^decimals).',
+                                                    'example' => 5.117254324
+                                                ]
+                                            ]
+                                        ]
+                                    ]
+                                ]
+                            ],
+                            'navi' => [
+                                'type' => 'object',
+                                'description' => 'NAVI Protocol lending/borrowing positions.',
+                                'properties' => [
+                                    'positions' => [
+                                        'type' => 'array',
+                                        'items' => [
+                                            'type' => 'object',
+                                            'properties' => [
+                                                'market' => [
+                                                    'type' => 'string',
+                                                    'description' => 'Which NAVI market this position is in.',
+                                                    'example' => 'main'
+                                                ],
+                                                'assetId' => ['type' => 'integer', 'example' => 32],
+                                                'symbol' => ['type' => 'string', 'example' => 'WBTC'],
+                                                'coinType' => ['type' => 'string'],
+                                                'supplyBalance' => [
+                                                    'type' => 'string',
+                                                    'description' => 'Raw supplied balance, as a string.',
+                                                    'example' => '7279723'
+                                                ],
+                                                'borrowBalance' => [
+                                                    'type' => 'string',
+                                                    'description' => 'Raw borrowed balance, as a string.',
+                                                    'example' => '0'
+                                                ],
+                                                'supplyAmount' => ['type' => 'number', 'example' => 0.007279723],
+                                                'borrowAmount' => ['type' => 'number', 'example' => 0],
+                                                'priceUsd' => ['type' => 'number', 'example' => 62113.226]
+                                            ]
+                                        ]
+                                    ],
+                                    'healthFactor' => [
+                                        'type' => 'number',
+                                        'description' => 'NAVI account health factor across all positions; '
+                                            . 'below 1 is eligible for liquidation.',
+                                        'example' => 1.7883891539706314
+                                    ]
+                                ]
+                            ]
+                        ]
+                    ],
                     'CurrentHoldingsResult' => [
                         'type' => 'object',
                         'properties' => [

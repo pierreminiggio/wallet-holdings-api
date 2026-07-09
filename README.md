@@ -33,6 +33,22 @@ reuses what's already cached and only fetches the gap, if any.
   No caching — each call goes live to Zerion. Requires a Zerion API key in `config.php` (free tier:
   2,000 requests/day, no credit card — register at [dashboard.zerion.io](https://dashboard.zerion.io/)).
   Use this for current state; use `/holdings/{address}` when you need a historical date.
+* `GET /sui-holdings-now/{address}` - **Current** SUI wallet coin holdings and NAVI
+  Protocol lending/borrowing positions. `{address}` here is a 0x-prefixed,
+  64-hex-character SUI address (not an EVM address). Serves a cached snapshot if one
+  younger than **2 hours** exists for that address; otherwise triggers a live run of the
+  [`pierreminiggio/sui-navi-report`](https://github.com/pierreminiggio/sui-navi-report)
+  GitHub Action (can take roughly a minute), caches the result, and returns it. Every
+  fresh fetch is appended as a new row rather than overwriting the previous cache, so a
+  history of snapshots builds up per address over time. Requires a GitHub token in
+  `config.php` under `github.token` with permission to trigger workflow runs and read
+  Actions artifacts on that repo. See that project's own README for the response schema
+  (`wallet.coins[]`, `navi.positions[]`, `navi.healthFactor`).
+* `GET /sui-holdings/{address}?date=YYYY-MM-DD` - Read-only lookup of an **already-cached**
+  SUI snapshot. Returns the most recent `/sui-holdings-now` snapshot cached for that address
+  on the given UTC day (defaults to today, UTC, if `date` is omitted). Never triggers a fresh
+  GitHub Action run itself — if nothing was cached for that address on that day, it fails with
+  a `500` rather than silently returning a different day's data.
 * `GET /openapi` - Interactive API documentation (Swagger UI).
 
 `{address}` must be a `0x`-prefixed, 40-hex-character EVM address.
@@ -198,6 +214,10 @@ based on documentation or a web page — the same process that worked for Base:
 4. (Required for `/holdings-now`) Register a free Zerion API key at
    [dashboard.zerion.io](https://dashboard.zerion.io/) (no credit card, 2,000 requests/day free)
    and set it as `zerion.api_key` in `config.php`. Without this, `/holdings-now` returns a `503`.
+5. (Required for `/sui-holdings-now`) Generate a GitHub personal access token with permission to
+   trigger workflow runs and read Actions artifacts on `pierreminiggio/sui-navi-report`, and set
+   it as `github.token` in `config.php`. Without this (and without an existing fresh-enough
+   cached result), `/sui-holdings-now` returns a `503`.
 5. Ensure the `bcmath` PHP extension is enabled (used throughout for precise arbitrary-size
    integer arithmetic on wei-level amounts, which exceed native PHP int/float precision)
 6. Run the migration below on your database
@@ -287,7 +307,28 @@ ALTER TABLE `zerion_position`
 
 ALTER TABLE `zerion_position`
   MODIFY `id` bigint(20) NOT NULL AUTO_INCREMENT;
+
+CREATE TABLE `sui_holdings_cache` (
+  `id` bigint(20) NOT NULL,
+  `address` varchar(66) NOT NULL,
+  `report_json` longtext NOT NULL,
+  `cached_at` bigint(20) NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+ALTER TABLE `sui_holdings_cache`
+  ADD PRIMARY KEY (`id`),
+  ADD KEY `address_cached_at` (`address`, `cached_at`);
+
+ALTER TABLE `sui_holdings_cache`
+  MODIFY `id` bigint(20) NOT NULL AUTO_INCREMENT;
 ```
+
+`sui_holdings_cache` is deliberately append-only: `address` is **not** unique, and every
+fresh fetch for `/sui-holdings-now/{address}` inserts a new row rather than overwriting
+the previous one, so a history of past snapshots builds up per address instead of only
+ever keeping the latest. `cached_at` is a Unix timestamp (consistent with the other
+timestamp columns in this schema) rather than a `DATETIME`, so freshness (the 2-hour
+cache window) is a plain integer comparison in PHP.
 
 `signed_amount` is stored as `decimal(40,0)` / `decimal(50,0)` (no decimal places: these are raw
 on-chain integer amounts, e.g. wei) rather than a PHP int/float, since wei-level amounts routinely
