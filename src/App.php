@@ -86,6 +86,34 @@ class App
 
         $config = $this->loadConfig();
         $fetcher = $this->createDatabaseFetcher($config);
+
+        // Zerion cache bypass: if we have positions stored from /holdings-now calls made
+        // on the requested date, use those directly rather than running the full
+        // transaction-replay reconstruction. This is both faster and more reliable (no
+        // risk of the internal-transaction indexing gaps that affect reconstruction on
+        // Base), and builds historical coverage naturally as /holdings-now is called
+        // frequently over time. Only bypasses networks that have Zerion cache -- any
+        // network not covered falls through to the reconstruction path below.
+        $zerionRepository = new ZerionPositionRepository($fetcher);
+        $zerionPositions = $zerionRepository->getPositionsForDate($address, $targetDate);
+
+        if (! empty($zerionPositions)) {
+            // Group Zerion positions by chain -- Zerion uses its own chain ID strings
+            // (e.g. "ethereum", "base", "binance-smart-chain"), so we return those
+            // directly rather than mapping to Network::* constants.
+            $zerionByChain = $this->groupPositionsByChain($zerionPositions);
+
+            http_response_code(200);
+            echo json_encode([
+                'address' => $address,
+                'date' => $targetDate,
+                'source' => 'zerion_cache',
+                'holdings' => $zerionByChain
+            ]);
+
+            return;
+        }
+
         $repository = new WalletDataRepository($fetcher);
         $calculator = new HoldingsCalculator();
 
@@ -159,11 +187,52 @@ class App
             return;
         }
 
-        $client = new ZerionClient($zerionApiKey);
+        $fetcher = $this->createDatabaseFetcher($config);
+        $repository = new ZerionPositionRepository($fetcher);
 
+        // Rate-limit cache: if the last fetch for this address was within the TTL window,
+        // return cached data directly without hitting Zerion at all.
+        if ($repository->isCacheFresh($address)) {
+            $cachedPositions = $repository->getLatestPositions($address);
+            $lastFetchedAt = $repository->getLastFetchedAt($address);
+            http_response_code(200);
+            echo json_encode([
+                'address' => $address,
+                'as_of' => gmdate('Y-m-d'),
+                'cache' => ['hit' => true, 'fetched_at' => $lastFetchedAt],
+                'holdings' => $this->groupPositionsByChain($cachedPositions)
+            ]);
+
+            return;
+        }
+
+        // Cache is stale (or absent) -- call Zerion for fresh data.
+        $client = new ZerionClient($zerionApiKey);
         $walletPositions = $client->getWalletPositions($address);
 
         if (is_string($walletPositions)) {
+            // Zerion failed. Fall back to same-day cache if available -- stale-but-today
+            // data is likely still close to correct. Yesterday's or older data is not
+            // offered as a fallback, since holdings can change materially overnight.
+            if ($repository->isCacheFromToday($address)) {
+                $cachedPositions = $repository->getLatestPositions($address);
+                $lastFetchedAt = $repository->getLastFetchedAt($address);
+                http_response_code(200);
+                echo json_encode([
+                    'address' => $address,
+                    'as_of' => gmdate('Y-m-d'),
+                    'cache' => [
+                        'hit' => true,
+                        'fetched_at' => $lastFetchedAt,
+                        'warning' => 'Zerion call failed; returning stale same-day cache. '
+                            . 'Data may not reflect the most recent activity.'
+                    ],
+                    'holdings' => $this->groupPositionsByChain($cachedPositions)
+                ]);
+
+                return;
+            }
+
             [$statusCode, $body] = $this->buildZerionErrorResponse($walletPositions);
             http_response_code($statusCode);
             echo json_encode($body);
@@ -174,6 +243,26 @@ class App
         $defiPositions = $client->getDefiPositions($address);
 
         if (is_string($defiPositions)) {
+            // Same fallback logic as above for the DeFi call specifically.
+            if ($repository->isCacheFromToday($address)) {
+                $cachedPositions = $repository->getLatestPositions($address);
+                $lastFetchedAt = $repository->getLastFetchedAt($address);
+                http_response_code(200);
+                echo json_encode([
+                    'address' => $address,
+                    'as_of' => gmdate('Y-m-d'),
+                    'cache' => [
+                        'hit' => true,
+                        'fetched_at' => $lastFetchedAt,
+                        'warning' => 'Zerion DeFi call failed; returning stale same-day cache. '
+                            . 'DeFi positions may not reflect the most recent activity.'
+                    ],
+                    'holdings' => $this->groupPositionsByChain($cachedPositions)
+                ]);
+
+                return;
+            }
+
             [$statusCode, $body] = $this->buildZerionErrorResponse($defiPositions);
             http_response_code($statusCode);
             echo json_encode($body);
@@ -181,11 +270,40 @@ class App
             return;
         }
 
-        // Merge wallet and DeFi positions, then group by chain.
+        // Both calls succeeded -- store the fresh data and return it.
         $allPositions = [...$walletPositions, ...$defiPositions];
+        $fetchedAt = gmdate('Y-m-d H:i:s');
+
+        try {
+            $repository->storePositions($address, $allPositions, $fetchedAt);
+        } catch (\Throwable $e) {
+            // A storage failure is non-fatal here: we have fresh data from Zerion and
+            // can return it even if we couldn't cache it. Log it but don't fail the request.
+            error_log('ZerionPositionRepository::storePositions failed: ' . $e->getMessage());
+        }
+
+        http_response_code(200);
+        echo json_encode([
+            'address' => $address,
+            'as_of' => gmdate('Y-m-d'),
+            'cache' => ['hit' => false, 'fetched_at' => $fetchedAt],
+            'holdings' => $this->groupPositionsByChain($allPositions)
+        ]);
+    }
+
+    /**
+     * Groups a flat list of ZerionPositions into the by-chain array shape used in API
+     * responses: ['ethereum' => ['native' => ..., 'tokens' => [...], 'defi' => [...]]].
+     *
+     * @param list<ZerionPosition> $positions
+     *
+     * @return array<string, array{native: array|null, tokens: list<array>, defi: list<array>}>
+     */
+    private function groupPositionsByChain(array $positions): array
+    {
         $byChain = [];
 
-        foreach ($allPositions as $position) {
+        foreach ($positions as $position) {
             $chain = $position->chainId;
 
             if (! isset($byChain[$chain])) {
@@ -214,12 +332,7 @@ class App
             }
         }
 
-        http_response_code(200);
-        echo json_encode([
-            'address' => $address,
-            'as_of' => gmdate('Y-m-d'),
-            'holdings' => $byChain
-        ]);
+        return $byChain;
     }
 
     private function handleSuiHoldingsNow(string $address): void

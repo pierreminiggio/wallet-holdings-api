@@ -119,6 +119,8 @@ class ZerionClient
         $symbol = (string) ($fungibleInfo['symbol'] ?? '???');
         $positionType = (string) ($attrs['position_type'] ?? 'wallet');
         $protocolId = $attrs['protocol'] ?? null;
+        $updatedAt = isset($attrs['updated_at']) ? (string) $attrs['updated_at'] : null;
+        $updatedAtBlock = isset($attrs['updated_at_block']) ? (int) $attrs['updated_at_block'] : null;
 
         // Find the contract address for this specific chain from the implementations list.
         // Native coins have a null address on their chain, which correctly distinguishes
@@ -145,7 +147,9 @@ class ZerionClient
             contractAddress: $contractAddress,
             isNative: $isNative,
             positionType: $positionType,
-            protocolId: is_string($protocolId) ? $protocolId : null
+            protocolId: is_string($protocolId) ? $protocolId : null,
+            updatedAt: $updatedAt,
+            updatedAtBlock: $updatedAtBlock
         );
     }
 
