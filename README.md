@@ -264,6 +264,29 @@ ALTER TABLE `wallet_token_event`
 
 ALTER TABLE `wallet_token_event`
   MODIFY `id` bigint(20) NOT NULL AUTO_INCREMENT;
+
+CREATE TABLE `zerion_position` (
+  `id` bigint(20) NOT NULL,
+  `address`          varchar(42)  NOT NULL,
+  `chain_id`         varchar(32)  NOT NULL,
+  `symbol`           varchar(128) NOT NULL,
+  `contract_address` varchar(42)  NULL,
+  `position_type`    varchar(16)  NOT NULL,
+  `protocol_id`      varchar(64)  NULL,
+  `amount`           varchar(64)  NOT NULL,
+  `updated_at`       datetime     NULL,
+  `fetched_at`       datetime     NOT NULL,
+  `updated_at_block` bigint(20)   NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+ALTER TABLE `zerion_position`
+  ADD PRIMARY KEY (`id`),
+  ADD UNIQUE KEY `position_snapshot`
+    (`address`, `chain_id`, `contract_address`, `position_type`, `protocol_id`, `updated_at`),
+  ADD KEY `address_fetched_at` (`address`, `fetched_at`);
+
+ALTER TABLE `zerion_position`
+  MODIFY `id` bigint(20) NOT NULL AUTO_INCREMENT;
 ```
 
 `signed_amount` is stored as `decimal(40,0)` / `decimal(50,0)` (no decimal places: these are raw
