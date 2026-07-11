@@ -10,6 +10,11 @@ Polygon and BNB Smart Chain aren't active yet — see "Why Polygon and BNB aren'
 for what was checked. Re-adding a network that's confirmed working against a real provider is a
 small, contained change (see `App::createClientsForNetwork()`).
 
+**If you're about to touch the SUI endpoints (`/sui-holdings-now/{address}` or
+`/sui-holdings/{address}`), read `AGENTS.md` first.** It covers the caching/reconstruction
+architecture, a real bug already hit and fixed in this query builder, and a concrete
+regression-test checklist with real validated dates and expected values.
+
 ## Why "reconstruct" instead of "look up"
 
 Free, keyless blockchain explorer APIs only expose an address's **current** balance directly.
