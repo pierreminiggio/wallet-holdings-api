@@ -314,14 +314,29 @@ class App
         );
     }
 
+    // Default RPC endpoints for CompoundHoldingsClient / AaveHoldingsClient, used for any
+    // chain not overridden in config.php's "rpc" section (or if that section is absent
+    // entirely -- e.g. an existing config.php created before this section existed). These
+    // are free public endpoints (publicnode.com); config.php values always take priority.
+    private const DEFAULT_RPC_URLS = [
+        'ethereum' => 'https://ethereum-rpc.publicnode.com',
+        'base' => 'https://base-rpc.publicnode.com',
+        'polygon' => 'https://polygon-bor-rpc.publicnode.com',
+        'arbitrum' => 'https://arbitrum-one-rpc.publicnode.com',
+        'optimism' => 'https://optimism-rpc.publicnode.com'
+    ];
+
     /**
      * Assembles and outputs the final /holdings-now response: Zerion-derived
-     * token/native/misc-defi holdings (grouped by chain, as before), enriched with a
-     * new top-level "defi" key holding directly-verified on-chain Compound III and
-     * Aave V3 positions (CompoundHoldingsClient / AaveHoldingsClient -- no third-party
-     * API, straight eth_call reads). Also stores the fully-assembled response in the
-     * whole-response cache so the next call within the TTL window -- including this
-     * potentially-expensive on-chain enrichment -- is skipped entirely.
+     * token/native/defi holdings, grouped by chain as before, except each chain's
+     * existing "defi" key is now an object with "compound" and "aave" sub-keys holding
+     * directly-verified on-chain Compound III / Aave V3 positions for that chain
+     * (CompoundHoldingsClient / AaveHoldingsClient -- no third-party API, straight
+     * eth_call reads), plus an "other" sub-key preserving whatever Zerion-sourced
+     * misc-protocol positions (staking, LP, etc.) were there before. Also stores the
+     * fully-assembled response in the whole-response cache so the next call within the
+     * TTL window -- including this potentially-expensive on-chain enrichment -- is
+     * skipped entirely.
      *
      * Only called from the "successful" branches of handleHoldingsNow(); error
      * responses (missing API key, Zerion failure with no usable fallback) are
@@ -341,36 +356,64 @@ class App
         array $config,
         HoldingsNowCacheRepository $holdingsNowCache
     ): void {
-        $rpcUrls = array_filter(
+        $configRpcUrls = array_filter(
             (array) ($config['rpc'] ?? []),
             fn ($url) => is_string($url) && $url !== ''
         );
+        // Config values override defaults per-chain; a chain missing from config.php
+        // still gets a working default rather than silently being skipped.
+        $rpcUrls = array_merge(self::DEFAULT_RPC_URLS, $configRpcUrls);
 
         $compound = (new CompoundHoldingsClient($rpcUrls))->getHoldings($address);
         $aave = (new AaveHoldingsClient($rpcUrls))->getHoldings($address);
 
-        $defi = ['compound' => $compound['positions'], 'aave' => $aave['positions']];
+        $byChain = $this->groupPositionsByChain($positions);
+
+        // Merge compound/aave into each chain's existing "defi" key. Also covers chains
+        // that have a Compound/Aave position but no Zerion-tracked native/token/defi
+        // activity at all (e.g. a wallet that only ever interacted with a lending
+        // protocol on some chain) -- such a chain wouldn't exist in $byChain yet, so it's
+        // added here rather than that position being silently dropped.
+        $allChains = array_unique(array_merge(
+            array_keys($byChain),
+            array_keys($compound['positions']),
+            array_keys($aave['positions'])
+        ));
+
+        foreach ($allChains as $chain) {
+            if (! isset($byChain[$chain])) {
+                $byChain[$chain] = ['native' => null, 'tokens' => [], 'defi' => []];
+            }
+
+            $zerionDefi = $byChain[$chain]['defi']; // previous flat Zerion-sourced list
+
+            $byChain[$chain]['defi'] = [
+                'compound' => $compound['positions'][$chain] ?? [],
+                'aave' => $aave['positions'][$chain] ?? null,
+                'other' => $zerionDefi
+            ];
+        }
 
         // Per-chain RPC failures are non-fatal (see CompoundHoldingsClient::getHoldings /
         // AaveHoldingsClient::getHoldings docblocks) -- surface them for transparency
-        // rather than silently dropping that chain's data, but only if something actually
-        // failed, so the common case doesn't carry an always-present empty "errors" key.
+        // rather than silently dropping that chain's data, but only if something
+        // actually failed, and separately from "holdings" so it doesn't disturb that
+        // per-chain shape.
         $defiErrors = array_filter([
             'compound' => $compound['errors'],
             'aave' => $aave['errors']
         ], fn ($errors) => ! empty($errors));
 
-        if (! empty($defiErrors)) {
-            $defi['errors'] = $defiErrors;
-        }
-
         $response = [
             'address' => $address,
             'as_of' => gmdate('Y-m-d'),
             'cache' => $cacheInfo,
-            'holdings' => $this->groupPositionsByChain($positions),
-            'defi' => $defi
+            'holdings' => $byChain
         ];
+
+        if (! empty($defiErrors)) {
+            $response['defi_errors'] = $defiErrors;
+        }
 
         $responseJson = json_encode($response);
 
@@ -389,6 +432,9 @@ class App
     /**
      * Groups a flat list of ZerionPositions into the by-chain array shape used in API
      * responses: ['ethereum' => ['native' => ..., 'tokens' => [...], 'defi' => [...]]].
+     * Note: the "defi" list produced here is a flat Zerion-sourced list; callers building
+     * the /holdings-now response restructure it further (see respondWithHoldingsNow) into
+     * {compound, aave, other} before it reaches the client.
      *
      * @param list<ZerionPosition> $positions
      *
@@ -1106,8 +1152,10 @@ class App
                             'holdings' => [
                                 'type' => 'object',
                                 'description' => 'Keyed by Zerion chain ID (e.g. "ethereum", "base", '
-                                    . '"polygon", "binance-smart-chain"). Only chains where this wallet '
-                                    . 'has a non-zero position appear.',
+                                    . '"polygon", "binance-smart-chain"). Includes every chain where this '
+                                    . 'wallet has a non-zero position of any kind (native, token, or defi), '
+                                    . 'plus any chain with a Compound/Aave position even if Zerion tracked '
+                                    . 'nothing else there.',
                                 'additionalProperties' => [
                                     'type' => 'object',
                                     'properties' => [
@@ -1131,129 +1179,128 @@ class App
                                             ]
                                         ],
                                         'defi' => [
-                                            'type' => 'array',
-                                            'description' => 'Misc DeFi protocol positions from Zerion (staked, '
-                                                . 'locked, LP, etc.), per chain. Aave/Compound deposits typically '
-                                                . 'appear as aTokens in the tokens array rather than here -- for '
-                                                . 'directly-verified Aave/Compound positions, see the top-level '
-                                                . '"defi" key instead (CurrentHoldingsResult.defi), which is '
-                                                . 'separate from this per-chain one.',
-                                            'items' => [
-                                                'type' => 'object',
-                                                'properties' => [
-                                                    'symbol' => ['type' => 'string', 'example' => 'ETH'],
-                                                    'contract' => ['type' => 'string', 'nullable' => true],
-                                                    'amount' => ['type' => 'string', 'example' => '1.5'],
-                                                    'type' => ['type' => 'string', 'example' => 'staked'],
-                                                    'protocol' => ['type' => 'string', 'nullable' => true, 'example' => 'lido']
+                                            'type' => 'object',
+                                            'description' => 'DeFi positions on this chain, split by source. '
+                                                . '"compound"/"aave" are directly-verified on-chain reads '
+                                                . '(raw eth_call against each protocol\'s own contracts -- no '
+                                                . 'third-party API); "other" is whatever misc protocol positions '
+                                                . '(staking, LP, etc.) Zerion reported for this chain, unrelated '
+                                                . 'to Compound/Aave.',
+                                            'properties' => [
+                                                'compound' => [
+                                                    'type' => 'array',
+                                                    'description' => 'Empty if this wallet has no Compound '
+                                                        . 'position on this chain. Currently tracks each '
+                                                        . 'chain\'s USDC market only.',
+                                                    'items' => [
+                                                        'type' => 'object',
+                                                        'properties' => [
+                                                            'base' => ['type' => 'string', 'example' => 'USDC'],
+                                                            'market' => [
+                                                                'type' => 'string',
+                                                                'description' => 'Comet proxy contract address.',
+                                                                'example' => '0xb125E6687d4313864e53df431d5425969c15Eb2F'
+                                                            ],
+                                                            'supplied' => ['type' => 'string', 'example' => '0'],
+                                                            'borrowed' => ['type' => 'string', 'example' => '7498.864669'],
+                                                            'collateral' => [
+                                                                'type' => 'array',
+                                                                'items' => [
+                                                                    'type' => 'object',
+                                                                    'properties' => [
+                                                                        'symbol' => ['type' => 'string', 'example' => 'WETH'],
+                                                                        'amount' => ['type' => 'string', 'example' => '0.134']
+                                                                    ]
+                                                                ]
+                                                            ]
+                                                        ]
+                                                    ]
+                                                ],
+                                                'aave' => [
+                                                    'type' => 'object',
+                                                    'nullable' => true,
+                                                    'description' => 'null if this wallet has no Aave position '
+                                                        . 'on this chain. Reserve list is discovered live from '
+                                                        . 'this chain\'s Aave Pool, not hardcoded.',
+                                                    'properties' => [
+                                                        'reserves' => [
+                                                            'type' => 'array',
+                                                            'items' => [
+                                                                'type' => 'object',
+                                                                'properties' => [
+                                                                    'symbol' => ['type' => 'string', 'example' => 'WETH'],
+                                                                    'supplied' => ['type' => 'string', 'example' => '0.134'],
+                                                                    'usedAsCollateral' => ['type' => 'boolean'],
+                                                                    'variableDebt' => ['type' => 'string', 'example' => '0'],
+                                                                    'stableDebt' => ['type' => 'string', 'example' => '0']
+                                                                ]
+                                                            ]
+                                                        ],
+                                                        'summary' => [
+                                                            'type' => 'object',
+                                                            'description' => 'Aggregated across every reserve on '
+                                                                . 'this chain, from Aave\'s own getUserAccountData.',
+                                                            'properties' => [
+                                                                'totalCollateralUsd' => ['type' => 'string', 'example' => '4901.31014678'],
+                                                                'totalDebtUsd' => ['type' => 'string', 'example' => '1805.27149713'],
+                                                                'ltv' => [
+                                                                    'type' => 'string',
+                                                                    'description' => 'Percent, e.g. "80" means 80%.',
+                                                                    'example' => '80'
+                                                                ],
+                                                                'liquidationThreshold' => ['type' => 'string', 'example' => '83'],
+                                                                'healthFactor' => [
+                                                                    'type' => 'string',
+                                                                    'nullable' => true,
+                                                                    'description' => 'Below 1 is eligible for '
+                                                                        . 'liquidation. null means no debt (Aave '
+                                                                        . 'returns "infinite").',
+                                                                    'example' => '2.2534490952163145'
+                                                                ]
+                                                            ]
+                                                        ]
+                                                    ]
+                                                ],
+                                                'other' => [
+                                                    'type' => 'array',
+                                                    'description' => 'Misc Zerion-sourced defi positions on this '
+                                                        . 'chain (staked, locked, LP, etc.), unrelated to '
+                                                        . 'Compound/Aave.',
+                                                    'items' => [
+                                                        'type' => 'object',
+                                                        'properties' => [
+                                                            'symbol' => ['type' => 'string', 'example' => 'ETH'],
+                                                            'contract' => ['type' => 'string', 'nullable' => true],
+                                                            'amount' => ['type' => 'string', 'example' => '1.5'],
+                                                            'type' => ['type' => 'string', 'example' => 'staked'],
+                                                            'protocol' => ['type' => 'string', 'nullable' => true, 'example' => 'lido']
+                                                        ]
+                                                    ]
                                                 ]
                                             ]
                                         ]
                                     ]
                                 ]
                             ],
-                            'defi' => [
+                            'defi_errors' => [
                                 'type' => 'object',
-                                'description' => 'Directly-verified on-chain Compound III and Aave V3 positions '
-                                    . '(no Zerion/third-party API involved -- raw eth_call reads against each '
-                                    . 'protocol\'s own contracts). Top-level, not nested per chain like '
-                                    . '"holdings" -- each of "compound"/"aave" is itself keyed by chain, '
-                                    . 'containing only chains where this wallet has a non-zero position. '
-                                    . 'The whole /holdings-now response, including this section, is cached for '
-                                    . '2 hours per address -- see the "cache" field for the *inner* Zerion-level '
-                                    . 'cache status; there is currently no separate field exposing the outer '
-                                    . '2-hour cache\'s own age.',
+                                'nullable' => true,
+                                'description' => 'Present only if at least one chain\'s on-chain Compound/Aave '
+                                    . 'read failed (e.g. RPC timeout). A failed chain is simply omitted from '
+                                    . 'that chain\'s holdings.<chain>.defi.compound/aave rather than failing '
+                                    . 'the whole request -- this is where that failure is surfaced instead. '
+                                    . 'The whole /holdings-now response (including on-chain reads) is cached '
+                                    . 'for 2 hours per address -- see the "cache" field for the *inner* '
+                                    . 'Zerion-level cache status; there is currently no separate field '
+                                    . 'exposing the outer 2-hour cache\'s own age.',
                                 'properties' => [
                                     'compound' => [
                                         'type' => 'object',
-                                        'description' => 'Keyed by chain (e.g. "ethereum", "base"). Currently '
-                                            . 'tracks each chain\'s USDC market only.',
-                                        'additionalProperties' => [
-                                            'type' => 'object',
-                                            'properties' => [
-                                                'base' => ['type' => 'string', 'example' => 'USDC'],
-                                                'market' => [
-                                                    'type' => 'string',
-                                                    'description' => 'Comet proxy contract address for this market.',
-                                                    'example' => '0xb125E6687d4313864e53df431d5425969c15Eb2F'
-                                                ],
-                                                'supplied' => ['type' => 'string', 'example' => '0'],
-                                                'borrowed' => ['type' => 'string', 'example' => '7498.864669'],
-                                                'collateral' => [
-                                                    'type' => 'array',
-                                                    'items' => [
-                                                        'type' => 'object',
-                                                        'properties' => [
-                                                            'symbol' => ['type' => 'string', 'example' => 'WETH'],
-                                                            'amount' => ['type' => 'string', 'example' => '0.134']
-                                                        ]
-                                                    ]
-                                                ]
-                                            ]
-                                        ]
+                                        'description' => 'Chain => error code (e.g. "upstream_error").'
                                     ],
                                     'aave' => [
                                         'type' => 'object',
-                                        'description' => 'Keyed by chain (e.g. "ethereum", "base"). Reserve list '
-                                            . 'is discovered live from each chain\'s Aave Pool, not hardcoded.',
-                                        'additionalProperties' => [
-                                            'type' => 'object',
-                                            'properties' => [
-                                                'reserves' => [
-                                                    'type' => 'array',
-                                                    'items' => [
-                                                        'type' => 'object',
-                                                        'properties' => [
-                                                            'symbol' => ['type' => 'string', 'example' => 'WETH'],
-                                                            'supplied' => ['type' => 'string', 'example' => '0.134'],
-                                                            'usedAsCollateral' => ['type' => 'boolean'],
-                                                            'variableDebt' => ['type' => 'string', 'example' => '0'],
-                                                            'stableDebt' => ['type' => 'string', 'example' => '0']
-                                                        ]
-                                                    ]
-                                                ],
-                                                'summary' => [
-                                                    'type' => 'object',
-                                                    'description' => 'Aggregated across every reserve on this '
-                                                        . 'chain, from Aave\'s own getUserAccountData.',
-                                                    'properties' => [
-                                                        'totalCollateralUsd' => ['type' => 'string', 'example' => '4901.31014678'],
-                                                        'totalDebtUsd' => ['type' => 'string', 'example' => '1805.27149713'],
-                                                        'ltv' => [
-                                                            'type' => 'string',
-                                                            'description' => 'Percent, e.g. "80" means 80%.',
-                                                            'example' => '80'
-                                                        ],
-                                                        'liquidationThreshold' => ['type' => 'string', 'example' => '83'],
-                                                        'healthFactor' => [
-                                                            'type' => 'string',
-                                                            'nullable' => true,
-                                                            'description' => 'Below 1 is eligible for liquidation. '
-                                                                . 'null means no debt (Aave returns "infinite").',
-                                                            'example' => '2.2534490952163145'
-                                                        ]
-                                                    ]
-                                                ]
-                                            ]
-                                        ]
-                                    ],
-                                    'errors' => [
-                                        'type' => 'object',
-                                        'nullable' => true,
-                                        'description' => 'Present only if at least one chain\'s on-chain read '
-                                            . 'failed (e.g. RPC timeout). A failed chain is simply omitted from '
-                                            . '"compound"/"aave" above rather than failing the whole request -- '
-                                            . 'this is where that failure is surfaced instead.',
-                                        'properties' => [
-                                            'compound' => [
-                                                'type' => 'object',
-                                                'description' => 'Chain => error code (e.g. "upstream_error").'
-                                            ],
-                                            'aave' => [
-                                                'type' => 'object',
-                                                'description' => 'Chain => error code (e.g. "upstream_error").'
-                                            ]
-                                        ]
+                                        'description' => 'Chain => error code (e.g. "upstream_error").'
                                     ]
                                 ]
                             ]

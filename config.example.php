@@ -29,12 +29,13 @@ return [
     ],
     'rpc' => [
         // Used by CompoundHoldingsClient / AaveHoldingsClient (the "compound" and "aave"
-        // keys under /holdings-now's "defi" response) to read on-chain contract data
-        // directly via eth_call -- no API key needed for this part. These defaults are
-        // free public endpoints (publicnode.com), fine for occasional use but not for
-        // heavy/production traffic -- they rate-limit. Override with your own provider
-        // (Alchemy/Infura/QuickNode) per chain as needed; any chain left blank/omitted
-        // is simply skipped by both clients rather than failing the whole request.
+        // keys inside each chain's "defi" object under /holdings-now) to read on-chain
+        // contract data directly via eth_call -- no API key needed for this part. These
+        // same values are also baked in as defaults directly in App.php
+        // (App::DEFAULT_RPC_URLS), so this whole section can be omitted entirely from
+        // config.php and things still work -- only add a chain here if you want to
+        // override it with your own provider (Alchemy/Infura/QuickNode), e.g. because the
+        // public default is rate-limiting you.
         'ethereum' => 'https://ethereum-rpc.publicnode.com',
         'base' => 'https://base-rpc.publicnode.com',
         'polygon' => 'https://polygon-bor-rpc.publicnode.com',

@@ -30,21 +30,23 @@ reuses what's already cached and only fetches the gap, if any.
 * `GET /holdings-now/{address}` - **Current** holdings and DeFi positions right now, powered by
   Zerion's portfolio API. Covers 60+ chains simultaneously (Ethereum, Base, Polygon, BNB, Avalanche
   and more) in two calls — wallet tokens/native coins in one, DeFi protocol positions in the other.
-  Also includes a top-level `defi` key with **directly-verified on-chain** Compound III and Aave V3
-  positions (`defi.compound`, `defi.aave`, each keyed by chain) — read straight from each protocol's
-  own contracts via `eth_call`, no third-party API involved for that part. This exists because
-  Zerion's own per-chain `defi` list typically doesn't surface Aave/Compound at all (they show up
-  as plain aToken balances instead), so `defi.compound`/`defi.aave` fill that gap with verified data.
-  The entire response (Zerion holdings + the on-chain `defi` section) is cached per address for
-  **2 hours**: a request within that window returns the cached response as-is, skipping both the
-  Zerion calls and the on-chain reads entirely; once it's stale, everything is recomputed and
-  re-cached. (Zerion's own data additionally has its own separate, shorter 10-minute cache used
-  internally — see `ZerionPositionRepository` — which only matters when the outer 2-hour cache has
-  just expired.) Requires a Zerion API key in `config.php` (free tier: 2,000 requests/day, no credit
-  card — register at [dashboard.zerion.io](https://dashboard.zerion.io/)); the on-chain
-  `defi.compound`/`defi.aave` section works without one, using the free public RPC endpoints
-  pre-filled in `config.example.php` (override with your own provider per chain as needed).
-  Use this for current state; use `/holdings/{address}` when you need a historical date.
+  Each chain's `defi` key is further split into `compound`, `aave`, and `other`: `compound`/`aave`
+  are **directly-verified on-chain** Compound III / Aave V3 positions for that chain — read straight
+  from each protocol's own contracts via `eth_call`, no third-party API involved for that part —
+  while `other` is whatever misc protocol positions (staking, LP, etc.) Zerion itself reported for
+  that chain. This split exists because Zerion's own data typically doesn't surface Aave/Compound at
+  all (they show up as plain aToken balances instead), so `compound`/`aave` fill that gap with
+  verified data alongside whatever Zerion does report under `other`. The entire response (Zerion
+  holdings + the on-chain enrichment) is cached per address for **2 hours**: a request within that
+  window returns the cached response as-is, skipping both the Zerion calls and the on-chain reads
+  entirely; once it's stale, everything is recomputed and re-cached. (Zerion's own data additionally
+  has its own separate, shorter 10-minute cache used internally — see `ZerionPositionRepository` —
+  which only matters when the outer 2-hour cache has just expired.) Requires a Zerion API key in
+  `config.php` (free tier: 2,000 requests/day, no credit card — register at
+  [dashboard.zerion.io](https://dashboard.zerion.io/)); the on-chain `compound`/`aave` enrichment
+  works without any config at all, using built-in public RPC defaults (overridable per chain via
+  `config.php`'s `rpc` section). Use this for current state; use `/holdings/{address}` when you need
+  a historical date.
 * `GET /sui-holdings-now/{address}` - **Current** SUI wallet coin holdings and NAVI
   Protocol lending/borrowing positions. `{address}` here is a 0x-prefixed,
   64-hex-character SUI address (not an EVM address). Serves a cached snapshot if one
@@ -230,10 +232,11 @@ based on documentation or a web page — the same process that worked for Base:
    trigger workflow runs and read Actions artifacts on `pierreminiggio/sui-navi-report`, and set
    it as `github.token` in `config.php`. Without this (and without an existing fresh-enough
    cached result), `/sui-holdings-now` returns a `503`.
-6. (Optional) The `rpc` section in `config.php` powers `/holdings-now`'s on-chain
-   `defi.compound`/`defi.aave` section. It's pre-filled with free public RPC endpoints, so this
-   step can be skipped entirely to start -- override individual chains with your own provider
-   (Alchemy/Infura/QuickNode) if you hit rate limits, or blank out a chain to skip it.
+6. (Optional) The `rpc` section in `config.php` overrides the built-in public RPC defaults used
+   for `/holdings-now`'s on-chain `compound`/`aave` position reads (per chain, under each chain's
+   `defi` key). This step can be skipped entirely -- the defaults work out of the box -- unless
+   you want your own provider (Alchemy/Infura/QuickNode) for a specific chain, e.g. because the
+   public default is rate-limiting you.
 7. Ensure the `bcmath` PHP extension is enabled (used throughout for precise arbitrary-size
    integer arithmetic on wei-level amounts, which exceed native PHP int/float precision)
 8. Run the migration below on your database
@@ -354,7 +357,7 @@ ALTER TABLE `multichain_holdings_cache`
 ```
 
 `multichain_holdings_cache` caches the *entire* `/holdings-now/{address}` response body (Zerion-derived
-holdings plus the on-chain `defi.compound`/`defi.aave` section) for 2 hours per address --
+holdings plus the per-chain on-chain `compound`/`aave` enrichment) for 2 hours per address --
 `HoldingsNowCacheRepository`, mirroring `sui_holdings_cache`'s `cached_at`-as-Unix-timestamp
 pattern. Unlike `sui_holdings_cache`, this table is deliberately **not** append-only: `address` is
 unique, and every fresh fetch overwrites the previous row (`ON DUPLICATE KEY UPDATE`) rather than
