@@ -338,22 +338,22 @@ ALTER TABLE `sui_holdings_cache`
 ALTER TABLE `sui_holdings_cache`
   MODIFY `id` bigint(20) NOT NULL AUTO_INCREMENT;
 
-CREATE TABLE `holdings_now_cache` (
+CREATE TABLE `multichain_holdings_cache` (
   `id` bigint(20) NOT NULL,
   `address` varchar(42) NOT NULL,
   `response_json` longtext NOT NULL,
   `cached_at` bigint(20) NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
-ALTER TABLE `holdings_now_cache`
+ALTER TABLE `multichain_holdings_cache`
   ADD PRIMARY KEY (`id`),
   ADD UNIQUE KEY `address` (`address`);
 
-ALTER TABLE `holdings_now_cache`
+ALTER TABLE `multichain_holdings_cache`
   MODIFY `id` bigint(20) NOT NULL AUTO_INCREMENT;
 ```
 
-`holdings_now_cache` caches the *entire* `/holdings-now/{address}` response body (Zerion-derived
+`multichain_holdings_cache` caches the *entire* `/holdings-now/{address}` response body (Zerion-derived
 holdings plus the on-chain `defi.compound`/`defi.aave` section) for 2 hours per address --
 `HoldingsNowCacheRepository`, mirroring `sui_holdings_cache`'s `cached_at`-as-Unix-timestamp
 pattern. Unlike `sui_holdings_cache`, this table is deliberately **not** append-only: `address` is

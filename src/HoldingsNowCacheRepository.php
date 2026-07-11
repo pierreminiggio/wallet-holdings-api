@@ -18,7 +18,7 @@ use PierreMiniggio\DatabaseFetcher\DatabaseFetcher;
  */
 class HoldingsNowCacheRepository
 {
-    private const TABLE = 'holdings_now_cache';
+    private const TABLE = 'multichain_holdings_cache';
 
     // A cached response younger than this is served as-is instead of triggering a fresh
     // fetch (Zerion calls + on-chain Compound/Aave reads).
