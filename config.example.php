@@ -26,5 +26,19 @@ return [
         // pierreminiggio/sui-navi-report. Without this, /sui-holdings-now returns a 503
         // (unless a fresh-enough cached result already exists for the requested address).
         'token' => ''
+    ],
+    'rpc' => [
+        // Used by CompoundHoldingsClient / AaveHoldingsClient (the "compound" and "aave"
+        // keys under /holdings-now's "defi" response) to read on-chain contract data
+        // directly via eth_call -- no API key needed for this part. These defaults are
+        // free public endpoints (publicnode.com), fine for occasional use but not for
+        // heavy/production traffic -- they rate-limit. Override with your own provider
+        // (Alchemy/Infura/QuickNode) per chain as needed; any chain left blank/omitted
+        // is simply skipped by both clients rather than failing the whole request.
+        'ethereum' => 'https://ethereum-rpc.publicnode.com',
+        'base' => 'https://base-rpc.publicnode.com',
+        'polygon' => 'https://polygon-bor-rpc.publicnode.com',
+        'arbitrum' => 'https://arbitrum-one-rpc.publicnode.com',
+        'optimism' => 'https://optimism-rpc.publicnode.com'
     ]
 ];

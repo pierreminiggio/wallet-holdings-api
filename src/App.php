@@ -176,6 +176,27 @@ class App
         }
 
         $config = $this->loadConfig();
+        $fetcher = $this->createDatabaseFetcher($config);
+
+        // Whole-response cache: if a fresh-enough (< 2h) response was already computed
+        // for this address -- including the on-chain Compound/Aave reads below, which
+        // are by far the most expensive part -- return it as-is and skip everything else.
+        $holdingsNowCache = new HoldingsNowCacheRepository($fetcher);
+        $freshCache = $holdingsNowCache->getFreshCache($address);
+
+        if ($freshCache !== null) {
+            http_response_code(200);
+            echo $freshCache['responseJson'];
+
+            return;
+        }
+
+        // Building a fresh response below can involve many sequential upstream calls
+        // (Zerion, plus up to 5 chains x 30+ Aave reserves x 2 eth_calls each), which can
+        // add up to longer than PHP's default execution time limit -- same reasoning as
+        // App::run()'s set_time_limit(0) call for /holdings.
+        set_time_limit(0);
+
         $zerionApiKey = $config['zerion']['api_key'] ?? '';
 
         if ($zerionApiKey === '') {
@@ -187,21 +208,21 @@ class App
             return;
         }
 
-        $fetcher = $this->createDatabaseFetcher($config);
         $repository = new ZerionPositionRepository($fetcher);
 
         // Rate-limit cache: if the last fetch for this address was within the TTL window,
-        // return cached data directly without hitting Zerion at all.
+        // reuse cached Zerion data directly without hitting Zerion at all.
         if ($repository->isCacheFresh($address)) {
             $cachedPositions = $repository->getLatestPositions($address);
             $lastFetchedAt = $repository->getLastFetchedAt($address);
-            http_response_code(200);
-            echo json_encode([
-                'address' => $address,
-                'as_of' => gmdate('Y-m-d'),
-                'cache' => ['hit' => true, 'fetched_at' => $lastFetchedAt],
-                'holdings' => $this->groupPositionsByChain($cachedPositions)
-            ]);
+
+            $this->respondWithHoldingsNow(
+                $address,
+                $cachedPositions,
+                ['hit' => true, 'fetched_at' => $lastFetchedAt],
+                $config,
+                $holdingsNowCache
+            );
 
             return;
         }
@@ -217,18 +238,19 @@ class App
             if ($repository->isCacheFromToday($address)) {
                 $cachedPositions = $repository->getLatestPositions($address);
                 $lastFetchedAt = $repository->getLastFetchedAt($address);
-                http_response_code(200);
-                echo json_encode([
-                    'address' => $address,
-                    'as_of' => gmdate('Y-m-d'),
-                    'cache' => [
+
+                $this->respondWithHoldingsNow(
+                    $address,
+                    $cachedPositions,
+                    [
                         'hit' => true,
                         'fetched_at' => $lastFetchedAt,
                         'warning' => 'Zerion call failed; returning stale same-day cache. '
                             . 'Data may not reflect the most recent activity.'
                     ],
-                    'holdings' => $this->groupPositionsByChain($cachedPositions)
-                ]);
+                    $config,
+                    $holdingsNowCache
+                );
 
                 return;
             }
@@ -247,18 +269,19 @@ class App
             if ($repository->isCacheFromToday($address)) {
                 $cachedPositions = $repository->getLatestPositions($address);
                 $lastFetchedAt = $repository->getLastFetchedAt($address);
-                http_response_code(200);
-                echo json_encode([
-                    'address' => $address,
-                    'as_of' => gmdate('Y-m-d'),
-                    'cache' => [
+
+                $this->respondWithHoldingsNow(
+                    $address,
+                    $cachedPositions,
+                    [
                         'hit' => true,
                         'fetched_at' => $lastFetchedAt,
                         'warning' => 'Zerion DeFi call failed; returning stale same-day cache. '
                             . 'DeFi positions may not reflect the most recent activity.'
                     ],
-                    'holdings' => $this->groupPositionsByChain($cachedPositions)
-                ]);
+                    $config,
+                    $holdingsNowCache
+                );
 
                 return;
             }
@@ -270,7 +293,7 @@ class App
             return;
         }
 
-        // Both calls succeeded -- store the fresh data and return it.
+        // Both calls succeeded -- store the fresh Zerion data and return it.
         $allPositions = [...$walletPositions, ...$defiPositions];
         $fetchedAt = gmdate('Y-m-d H:i:s');
 
@@ -282,13 +305,85 @@ class App
             error_log('ZerionPositionRepository::storePositions failed: ' . $e->getMessage());
         }
 
-        http_response_code(200);
-        echo json_encode([
+        $this->respondWithHoldingsNow(
+            $address,
+            $allPositions,
+            ['hit' => false, 'fetched_at' => $fetchedAt],
+            $config,
+            $holdingsNowCache
+        );
+    }
+
+    /**
+     * Assembles and outputs the final /holdings-now response: Zerion-derived
+     * token/native/misc-defi holdings (grouped by chain, as before), enriched with a
+     * new top-level "defi" key holding directly-verified on-chain Compound III and
+     * Aave V3 positions (CompoundHoldingsClient / AaveHoldingsClient -- no third-party
+     * API, straight eth_call reads). Also stores the fully-assembled response in the
+     * whole-response cache so the next call within the TTL window -- including this
+     * potentially-expensive on-chain enrichment -- is skipped entirely.
+     *
+     * Only called from the "successful" branches of handleHoldingsNow(); error
+     * responses (missing API key, Zerion failure with no usable fallback) are
+     * deliberately never cached, matching the existing precedent in this codebase
+     * (SuiHoldingsCacheRepository / handleSuiHoldingsNow only ever stores successful
+     * reports too).
+     *
+     * @param list<ZerionPosition> $positions
+     * @param array{hit: bool, fetched_at: ?string, warning?: string} $cacheInfo Zerion-level
+     *        cache info (distinct from, and nested inside, the outer whole-response cache).
+     * @param array<string, mixed> $config
+     */
+    private function respondWithHoldingsNow(
+        string $address,
+        array $positions,
+        array $cacheInfo,
+        array $config,
+        HoldingsNowCacheRepository $holdingsNowCache
+    ): void {
+        $rpcUrls = array_filter(
+            (array) ($config['rpc'] ?? []),
+            fn ($url) => is_string($url) && $url !== ''
+        );
+
+        $compound = (new CompoundHoldingsClient($rpcUrls))->getHoldings($address);
+        $aave = (new AaveHoldingsClient($rpcUrls))->getHoldings($address);
+
+        $defi = ['compound' => $compound['positions'], 'aave' => $aave['positions']];
+
+        // Per-chain RPC failures are non-fatal (see CompoundHoldingsClient::getHoldings /
+        // AaveHoldingsClient::getHoldings docblocks) -- surface them for transparency
+        // rather than silently dropping that chain's data, but only if something actually
+        // failed, so the common case doesn't carry an always-present empty "errors" key.
+        $defiErrors = array_filter([
+            'compound' => $compound['errors'],
+            'aave' => $aave['errors']
+        ], fn ($errors) => ! empty($errors));
+
+        if (! empty($defiErrors)) {
+            $defi['errors'] = $defiErrors;
+        }
+
+        $response = [
             'address' => $address,
             'as_of' => gmdate('Y-m-d'),
-            'cache' => ['hit' => false, 'fetched_at' => $fetchedAt],
-            'holdings' => $this->groupPositionsByChain($allPositions)
-        ]);
+            'cache' => $cacheInfo,
+            'holdings' => $this->groupPositionsByChain($positions),
+            'defi' => $defi
+        ];
+
+        $responseJson = json_encode($response);
+
+        try {
+            $holdingsNowCache->store($address, $responseJson);
+        } catch (\Throwable $e) {
+            // Same reasoning as the ZerionPositionRepository::storePositions catch
+            // above: a caching failure shouldn't fail a request that otherwise succeeded.
+            error_log('HoldingsNowCacheRepository::store failed: ' . $e->getMessage());
+        }
+
+        http_response_code(200);
+        echo $responseJson;
     }
 
     /**
@@ -1037,9 +1132,12 @@ class App
                                         ],
                                         'defi' => [
                                             'type' => 'array',
-                                            'description' => 'DeFi protocol positions (staked, locked, LP, etc.). '
-                                                . 'Aave/Compound deposits typically appear as aTokens in '
-                                                . 'the tokens array rather than here.',
+                                            'description' => 'Misc DeFi protocol positions from Zerion (staked, '
+                                                . 'locked, LP, etc.), per chain. Aave/Compound deposits typically '
+                                                . 'appear as aTokens in the tokens array rather than here -- for '
+                                                . 'directly-verified Aave/Compound positions, see the top-level '
+                                                . '"defi" key instead (CurrentHoldingsResult.defi), which is '
+                                                . 'separate from this per-chain one.',
                                             'items' => [
                                                 'type' => 'object',
                                                 'properties' => [
@@ -1049,6 +1147,111 @@ class App
                                                     'type' => ['type' => 'string', 'example' => 'staked'],
                                                     'protocol' => ['type' => 'string', 'nullable' => true, 'example' => 'lido']
                                                 ]
+                                            ]
+                                        ]
+                                    ]
+                                ]
+                            ],
+                            'defi' => [
+                                'type' => 'object',
+                                'description' => 'Directly-verified on-chain Compound III and Aave V3 positions '
+                                    . '(no Zerion/third-party API involved -- raw eth_call reads against each '
+                                    . 'protocol\'s own contracts). Top-level, not nested per chain like '
+                                    . '"holdings" -- each of "compound"/"aave" is itself keyed by chain, '
+                                    . 'containing only chains where this wallet has a non-zero position. '
+                                    . 'The whole /holdings-now response, including this section, is cached for '
+                                    . '2 hours per address -- see the "cache" field for the *inner* Zerion-level '
+                                    . 'cache status; there is currently no separate field exposing the outer '
+                                    . '2-hour cache\'s own age.',
+                                'properties' => [
+                                    'compound' => [
+                                        'type' => 'object',
+                                        'description' => 'Keyed by chain (e.g. "ethereum", "base"). Currently '
+                                            . 'tracks each chain\'s USDC market only.',
+                                        'additionalProperties' => [
+                                            'type' => 'object',
+                                            'properties' => [
+                                                'base' => ['type' => 'string', 'example' => 'USDC'],
+                                                'market' => [
+                                                    'type' => 'string',
+                                                    'description' => 'Comet proxy contract address for this market.',
+                                                    'example' => '0xb125E6687d4313864e53df431d5425969c15Eb2F'
+                                                ],
+                                                'supplied' => ['type' => 'string', 'example' => '0'],
+                                                'borrowed' => ['type' => 'string', 'example' => '7498.864669'],
+                                                'collateral' => [
+                                                    'type' => 'array',
+                                                    'items' => [
+                                                        'type' => 'object',
+                                                        'properties' => [
+                                                            'symbol' => ['type' => 'string', 'example' => 'WETH'],
+                                                            'amount' => ['type' => 'string', 'example' => '0.134']
+                                                        ]
+                                                    ]
+                                                ]
+                                            ]
+                                        ]
+                                    ],
+                                    'aave' => [
+                                        'type' => 'object',
+                                        'description' => 'Keyed by chain (e.g. "ethereum", "base"). Reserve list '
+                                            . 'is discovered live from each chain\'s Aave Pool, not hardcoded.',
+                                        'additionalProperties' => [
+                                            'type' => 'object',
+                                            'properties' => [
+                                                'reserves' => [
+                                                    'type' => 'array',
+                                                    'items' => [
+                                                        'type' => 'object',
+                                                        'properties' => [
+                                                            'symbol' => ['type' => 'string', 'example' => 'WETH'],
+                                                            'supplied' => ['type' => 'string', 'example' => '0.134'],
+                                                            'usedAsCollateral' => ['type' => 'boolean'],
+                                                            'variableDebt' => ['type' => 'string', 'example' => '0'],
+                                                            'stableDebt' => ['type' => 'string', 'example' => '0']
+                                                        ]
+                                                    ]
+                                                ],
+                                                'summary' => [
+                                                    'type' => 'object',
+                                                    'description' => 'Aggregated across every reserve on this '
+                                                        . 'chain, from Aave\'s own getUserAccountData.',
+                                                    'properties' => [
+                                                        'totalCollateralUsd' => ['type' => 'string', 'example' => '4901.31014678'],
+                                                        'totalDebtUsd' => ['type' => 'string', 'example' => '1805.27149713'],
+                                                        'ltv' => [
+                                                            'type' => 'string',
+                                                            'description' => 'Percent, e.g. "80" means 80%.',
+                                                            'example' => '80'
+                                                        ],
+                                                        'liquidationThreshold' => ['type' => 'string', 'example' => '83'],
+                                                        'healthFactor' => [
+                                                            'type' => 'string',
+                                                            'nullable' => true,
+                                                            'description' => 'Below 1 is eligible for liquidation. '
+                                                                . 'null means no debt (Aave returns "infinite").',
+                                                            'example' => '2.2534490952163145'
+                                                        ]
+                                                    ]
+                                                ]
+                                            ]
+                                        ]
+                                    ],
+                                    'errors' => [
+                                        'type' => 'object',
+                                        'nullable' => true,
+                                        'description' => 'Present only if at least one chain\'s on-chain read '
+                                            . 'failed (e.g. RPC timeout). A failed chain is simply omitted from '
+                                            . '"compound"/"aave" above rather than failing the whole request -- '
+                                            . 'this is where that failure is surfaced instead.',
+                                        'properties' => [
+                                            'compound' => [
+                                                'type' => 'object',
+                                                'description' => 'Chain => error code (e.g. "upstream_error").'
+                                            ],
+                                            'aave' => [
+                                                'type' => 'object',
+                                                'description' => 'Chain => error code (e.g. "upstream_error").'
                                             ]
                                         ]
                                     ]

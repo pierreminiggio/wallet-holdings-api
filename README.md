@@ -30,8 +30,20 @@ reuses what's already cached and only fetches the gap, if any.
 * `GET /holdings-now/{address}` - **Current** holdings and DeFi positions right now, powered by
   Zerion's portfolio API. Covers 60+ chains simultaneously (Ethereum, Base, Polygon, BNB, Avalanche
   and more) in two calls — wallet tokens/native coins in one, DeFi protocol positions in the other.
-  No caching — each call goes live to Zerion. Requires a Zerion API key in `config.php` (free tier:
-  2,000 requests/day, no credit card — register at [dashboard.zerion.io](https://dashboard.zerion.io/)).
+  Also includes a top-level `defi` key with **directly-verified on-chain** Compound III and Aave V3
+  positions (`defi.compound`, `defi.aave`, each keyed by chain) — read straight from each protocol's
+  own contracts via `eth_call`, no third-party API involved for that part. This exists because
+  Zerion's own per-chain `defi` list typically doesn't surface Aave/Compound at all (they show up
+  as plain aToken balances instead), so `defi.compound`/`defi.aave` fill that gap with verified data.
+  The entire response (Zerion holdings + the on-chain `defi` section) is cached per address for
+  **2 hours**: a request within that window returns the cached response as-is, skipping both the
+  Zerion calls and the on-chain reads entirely; once it's stale, everything is recomputed and
+  re-cached. (Zerion's own data additionally has its own separate, shorter 10-minute cache used
+  internally — see `ZerionPositionRepository` — which only matters when the outer 2-hour cache has
+  just expired.) Requires a Zerion API key in `config.php` (free tier: 2,000 requests/day, no credit
+  card — register at [dashboard.zerion.io](https://dashboard.zerion.io/)); the on-chain
+  `defi.compound`/`defi.aave` section works without one, using the free public RPC endpoints
+  pre-filled in `config.example.php` (override with your own provider per chain as needed).
   Use this for current state; use `/holdings/{address}` when you need a historical date.
 * `GET /sui-holdings-now/{address}` - **Current** SUI wallet coin holdings and NAVI
   Protocol lending/borrowing positions. `{address}` here is a 0x-prefixed,
@@ -218,10 +230,14 @@ based on documentation or a web page — the same process that worked for Base:
    trigger workflow runs and read Actions artifacts on `pierreminiggio/sui-navi-report`, and set
    it as `github.token` in `config.php`. Without this (and without an existing fresh-enough
    cached result), `/sui-holdings-now` returns a `503`.
-5. Ensure the `bcmath` PHP extension is enabled (used throughout for precise arbitrary-size
+6. (Optional) The `rpc` section in `config.php` powers `/holdings-now`'s on-chain
+   `defi.compound`/`defi.aave` section. It's pre-filled with free public RPC endpoints, so this
+   step can be skipped entirely to start -- override individual chains with your own provider
+   (Alchemy/Infura/QuickNode) if you hit rate limits, or blank out a chain to skip it.
+7. Ensure the `bcmath` PHP extension is enabled (used throughout for precise arbitrary-size
    integer arithmetic on wei-level amounts, which exceed native PHP int/float precision)
-6. Run the migration below on your database
-7. Point your webserver's document root to `public/`, or use the provided `.htaccess` with Apache
+8. Run the migration below on your database
+9. Point your webserver's document root to `public/`, or use the provided `.htaccess` with Apache
 
 ## Migration
 
@@ -321,7 +337,30 @@ ALTER TABLE `sui_holdings_cache`
 
 ALTER TABLE `sui_holdings_cache`
   MODIFY `id` bigint(20) NOT NULL AUTO_INCREMENT;
+
+CREATE TABLE `holdings_now_cache` (
+  `id` bigint(20) NOT NULL,
+  `address` varchar(42) NOT NULL,
+  `response_json` longtext NOT NULL,
+  `cached_at` bigint(20) NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+ALTER TABLE `holdings_now_cache`
+  ADD PRIMARY KEY (`id`),
+  ADD UNIQUE KEY `address` (`address`);
+
+ALTER TABLE `holdings_now_cache`
+  MODIFY `id` bigint(20) NOT NULL AUTO_INCREMENT;
 ```
+
+`holdings_now_cache` caches the *entire* `/holdings-now/{address}` response body (Zerion-derived
+holdings plus the on-chain `defi.compound`/`defi.aave` section) for 2 hours per address --
+`HoldingsNowCacheRepository`, mirroring `sui_holdings_cache`'s `cached_at`-as-Unix-timestamp
+pattern. Unlike `sui_holdings_cache`, this table is deliberately **not** append-only: `address` is
+unique, and every fresh fetch overwrites the previous row (`ON DUPLICATE KEY UPDATE`) rather than
+accumulating history, since `/holdings-now` has no counterpart endpoint that reads a past cached
+snapshot by date the way `/sui-holdings` does for SUI -- there's no use case here for keeping old
+rows around, and upserting keeps the table small regardless of query frequency.
 
 `sui_holdings_cache` is deliberately append-only: `address` is **not** unique, and every
 fresh fetch for `/sui-holdings-now/{address}` inserts a new row rather than overwriting
