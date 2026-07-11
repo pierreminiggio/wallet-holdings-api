@@ -77,8 +77,7 @@ class SuiHoldingsCacheRepository
             $this->fetcher
                 ->createQuery(self::TABLE)
                 ->select('report_json, cached_at')
-                ->where('address = :address')
-                ->where('as_of_date = :as_of_date')
+                ->where('address = :address AND as_of_date = :as_of_date')
             ,
             ['address' => $address, 'as_of_date' => $date]
         );
