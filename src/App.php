@@ -529,19 +529,20 @@ class App
 
         $reportJson = json_encode($report, JSON_UNESCAPED_SLASHES);
 
-        $cacheRepository->store($address, $reportJson);
+        $cacheRepository->store($address, $reportJson, gmdate('Y-m-d'), 'live');
 
         http_response_code(200);
         echo $reportJson;
     }
 
     /**
-     * Serves the most recent cached /sui-holdings-now snapshot for this address that
-     * falls within the given UTC calendar day. Unlike /sui-holdings-now, this endpoint
-     * never triggers a fresh GitHub Action run itself -- it only ever reads what's
-     * already been cached (by earlier /sui-holdings-now calls on that day), and fails
-     * loudly with a 500 if nothing was cached that day rather than silently falling
-     * back to a different day's snapshot.
+     * Serves the cached snapshot for this address on the given UTC calendar day. Unlike
+     * /sui-holdings-now, a miss here doesn't necessarily fail -- it can trigger the
+     * sui-navi-report repo's historical reconstruction workflow, resuming from wherever this
+     * address's reconstruction cursor last left off (or from genesis if there isn't one yet),
+     * and backfilling every day walked along the way so a later request for any date in that
+     * range is a pure cache hit. See SuiHoldingsReconstructionService for the actual decision
+     * logic (including why some misses are a 400 and others a 500).
      */
     private function handleSuiHoldingsForDate(string $address, ?string $queryParameters): void
     {
@@ -571,33 +572,83 @@ class App
 
         $cached = $cacheRepository->getCacheForDate($address, $targetDate);
 
-        if ($cached === null) {
-            http_response_code(500);
-            echo json_encode(['message' => 'No cached SUI holdings snapshot exists for ' . $address
-                . ' on ' . $targetDate . '. This endpoint only serves snapshots already cached by '
-                . 'a prior /' . self::SUI_HOLDINGS_NOW_ENDPOINT . '/{address} call on that day -- it '
-                . 'never triggers a fresh fetch itself.']);
+        if ($cached !== null) {
+            http_response_code(200);
+            echo $cached['reportJson'];
 
             return;
         }
 
-        http_response_code(200);
-        echo $cached['reportJson'];
+        $githubToken = $config['github']['token'] ?? '';
+
+        if ($githubToken === '') {
+            http_response_code(503);
+            echo json_encode(['message' => 'This endpoint requires a GitHub token with permission to '
+                . 'trigger and read Actions runs/artifacts on pierreminiggio/sui-navi-report. Set it as '
+                . 'github.token in config.php.']);
+
+            return;
+        }
+
+        // Reconstruction can mean walking real on-chain history spanning months, across many
+        // GraphQL round trips -- same reasoning as /sui-holdings-now's set_time_limit(0), just
+        // with more headroom needed.
+        set_time_limit(0);
+
+        $cursorRepository = new SuiHoldingsCursorRepository($fetcher);
+        $actionClient = new SuiWalletReconstructionActionClient($githubToken);
+        $service = new SuiHoldingsReconstructionService($cacheRepository, $cursorRepository, $actionClient);
+
+        $result = $service->resolve($address, $targetDate);
+
+        switch ($result['outcome']) {
+            case SuiHoldingsReconstructionService::OUTCOME_FOUND:
+                http_response_code(200);
+                echo $result['reportJson'];
+
+                return;
+
+            case SuiHoldingsReconstructionService::OUTCOME_BEFORE_GENESIS:
+                http_response_code(400);
+                echo json_encode(['message' => 'No holdings can exist for ' . $address . ' on '
+                    . $targetDate . ' -- this predates the wallet\'s earliest on-chain activity.']);
+
+                return;
+
+            case SuiHoldingsReconstructionService::OUTCOME_INCONSISTENT:
+                http_response_code(500);
+                echo json_encode(['message' => 'Expected a cached snapshot for ' . $address . ' on '
+                    . $targetDate . ' (this date falls within an already-reconstructed range), but '
+                    . 'none was found. This indicates a data inconsistency in the cache, not a problem '
+                    . 'with the request.']);
+
+                return;
+
+            default: // OUTCOME_ACTION_ERROR
+                [$statusCode, $body] = $this->buildSuiActionErrorResponse(
+                    $result['actionError'],
+                    'reconstruction-result.json'
+                );
+                http_response_code($statusCode);
+                echo json_encode($body);
+
+                return;
+        }
     }
 
     /**
      * @return array{0: int, 1: array<string, mixed>}
      */
-    private function buildSuiActionErrorResponse(string $errorCode): array
+    private function buildSuiActionErrorResponse(string $errorCode, string $artifactName = 'wallet-report.json'): array
     {
         if ($errorCode === SuiWalletReportActionClient::ERROR_NO_ARTIFACT) {
             return [502, ['message' => 'The sui-navi-report GitHub Action run completed but produced no '
-                . 'wallet-report.json artifact to read.']];
+                . $artifactName . ' artifact to read.']];
         }
 
         if ($errorCode === SuiWalletReportActionClient::ERROR_INVALID_JSON) {
-            return [502, ['message' => 'The wallet-report.json artifact from the sui-navi-report GitHub '
-                . 'Action was not valid JSON.']];
+            return [502, ['message' => 'The ' . $artifactName . ' artifact from the sui-navi-report GitHub '
+                . 'Action was not valid.']];
         }
 
         return [502, ['message' => 'Could not run the sui-navi-report GitHub Action for this address. '
@@ -888,12 +939,18 @@ class App
                 ],
                 '/' . self::SUI_HOLDINGS_ENDPOINT . '/{address}' => [
                     'get' => [
-                        'summary' => 'Get the most recently cached SUI wallet snapshot for a given UTC day',
-                        'description' => 'Reads-only: returns the most recent snapshot already cached by a '
-                            . 'prior /' . self::SUI_HOLDINGS_NOW_ENDPOINT . '/{address} call that falls within '
-                            . 'the given UTC calendar day. Never triggers a fresh GitHub Action run itself -- '
-                            . 'if no snapshot was cached for that address on that day, this fails with a 500 '
-                            . 'rather than falling back to a different day\'s data or fetching a new one.',
+                        'summary' => 'Get this wallet\'s SUI + NAVI holdings as of a given UTC day, live or historical',
+                        'description' => 'Returns the cached snapshot for this address on the given UTC '
+                            . 'calendar day if one exists (whether it came from a prior /'
+                            . self::SUI_HOLDINGS_NOW_ENDPOINT . '/{address} call, or a prior call to this '
+                            . 'endpoint). On a miss, this endpoint can trigger a historical reconstruction '
+                            . 'run (resuming from wherever this address\'s reconstruction previously left '
+                            . 'off, or from genesis if this is the first request for it), which can take '
+                            . 'from under a minute up to several minutes depending on how much history '
+                            . 'needs to be walked. Every day crossed during that walk gets its own cached '
+                            . 'row -- including quiet days with no on-chain activity, which carry forward '
+                            . 'the most recent known state -- so a later request for any date in that range '
+                            . 'is a fast, pure cache hit rather than triggering reconstruction again.',
                         'parameters' => [
                             [
                                 'name' => 'address',
@@ -907,17 +964,20 @@ class App
                                 'in' => 'query',
                                 'required' => false,
                                 'schema' => ['type' => 'string', 'format' => 'date'],
-                                'description' => 'UTC calendar day (YYYY-MM-DD) to look up the most recent '
-                                    . 'cached snapshot for. Defaults to today (UTC) when omitted.'
+                                'description' => 'UTC calendar day (YYYY-MM-DD) to get holdings as of. '
+                                    . 'Defaults to today (UTC) when omitted.'
                             ]
                         ],
                         'responses' => [
                             '200' => [
-                                'description' => 'The most recent cached snapshot from that day. Same shape '
-                                    . 'as /' . self::SUI_HOLDINGS_NOW_ENDPOINT . '/{address}\'s response -- '
-                                    . 'wallet.coins[], navi.positions[], navi.healthFactor -- with the '
-                                    . 'address and generatedAt fields reflecting when that snapshot was '
-                                    . 'originally fetched, not the time of this request.',
+                                'description' => 'The snapshot for that day -- either cached already, or '
+                                    . 'just reconstructed. Same shape as /' . self::SUI_HOLDINGS_NOW_ENDPOINT
+                                    . '/{address}\'s response -- wallet.coins[], navi.positions[], '
+                                    . 'navi.healthFactor -- plus asOfDate and source ("live" or '
+                                    . '"reconstructed") fields. Reconstructed snapshots always have '
+                                    . 'navi.healthFactor and navi.positions[].priceUsd reflecting current '
+                                    . 'prices, not historical ones -- see the sui-navi-report repo\'s README '
+                                    . 'for why.',
                                 'content' => [
                                     'application/json' => [
                                         'schema' => ['$ref' => '#/components/schemas/SuiHoldingsSnapshot']
@@ -925,14 +985,30 @@ class App
                                 ]
                             ],
                             '400' => [
-                                'description' => 'Invalid address, or date not in YYYY-MM-DD format',
+                                'description' => 'Invalid address, date not in YYYY-MM-DD format, or the '
+                                    . 'requested date is before this wallet\'s earliest on-chain activity',
                                 'content' => [
                                     'application/json' => ['schema' => ['$ref' => '#/components/schemas/Error']]
                                 ]
                             ],
                             '500' => [
-                                'description' => 'No cached snapshot exists for this address on that '
-                                    . 'UTC day',
+                                'description' => 'A cache row was expected for this date (it falls within '
+                                    . 'an already-reconstructed range for this address) but is unexpectedly '
+                                    . 'missing -- a data inconsistency, not a problem with the request',
+                                'content' => [
+                                    'application/json' => ['schema' => ['$ref' => '#/components/schemas/Error']]
+                                ]
+                            ],
+                            '502' => [
+                                'description' => 'The reconstruction GitHub Action run failed, produced no '
+                                    . 'artifact, or produced invalid output',
+                                'content' => [
+                                    'application/json' => ['schema' => ['$ref' => '#/components/schemas/Error']]
+                                ]
+                            ],
+                            '503' => [
+                                'description' => 'No GitHub token configured for triggering the '
+                                    . 'reconstruction Action',
                                 'content' => [
                                     'application/json' => ['schema' => ['$ref' => '#/components/schemas/Error']]
                                 ]
@@ -1045,9 +1121,12 @@ class App
                 'schemas' => [
                     'SuiHoldingsSnapshot' => [
                         'type' => 'object',
-                        'description' => 'A single cached wallet-report.json snapshot, exactly as produced '
-                            . 'by the pierreminiggio/sui-navi-report GitHub Action and stored verbatim -- '
-                            . 'see that project\'s own README for the authoritative schema.',
+                        'description' => 'A single cached snapshot -- either exactly as produced by the '
+                            . 'pierreminiggio/sui-navi-report GitHub Action\'s live path (source: "live") '
+                            . 'and stored verbatim, or reconstructed for a past date (source: '
+                            . '"reconstructed") by that same repo\'s historical reconstruction workflow. '
+                            . 'See that project\'s own README/AGENTS.md for the authoritative schema and '
+                            . 'how reconstruction works.',
                         'properties' => [
                             'address' => [
                                 'type' => 'string',
@@ -1058,8 +1137,25 @@ class App
                                 'type' => 'string',
                                 'format' => 'date-time',
                                 'example' => '2026-07-08T21:45:56.730Z',
-                                'description' => 'UTC timestamp of when this snapshot was originally fetched '
-                                    . '(i.e. when the underlying GitHub Action ran), not when it was read.'
+                                'description' => 'UTC timestamp of when this snapshot was actually computed -- '
+                                    . 'for a live snapshot, when the GitHub Action ran; for a reconstructed '
+                                    . 'one, when this API backfilled it (which can be long after asOfDate).'
+                            ],
+                            'asOfDate' => [
+                                'type' => 'string',
+                                'format' => 'date',
+                                'example' => '2025-09-22',
+                                'description' => 'The UTC calendar date this snapshot\'s holdings represent. '
+                                    . 'Only present on reconstructed snapshots.'
+                            ],
+                            'source' => [
+                                'type' => 'string',
+                                'enum' => ['live', 'reconstructed'],
+                                'description' => '"live" for a snapshot fetched from the chain at the time '
+                                    . 'shown in generatedAt; "reconstructed" for one derived from historical '
+                                    . 'on-chain data for a past date. Reconstructed snapshots\' '
+                                    . 'navi.healthFactor and navi.positions[].priceUsd reflect current '
+                                    . 'prices, not asOfDate\'s -- see the sui-navi-report README for why.'
                             ],
                             'wallet' => [
                                 'type' => 'object',

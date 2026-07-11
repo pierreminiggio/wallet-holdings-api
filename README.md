@@ -58,11 +58,21 @@ reuses what's already cached and only fetches the gap, if any.
   `config.php` under `github.token` with permission to trigger workflow runs and read
   Actions artifacts on that repo. See that project's own README for the response schema
   (`wallet.coins[]`, `navi.positions[]`, `navi.healthFactor`).
-* `GET /sui-holdings/{address}?date=YYYY-MM-DD` - Read-only lookup of an **already-cached**
-  SUI snapshot. Returns the most recent `/sui-holdings-now` snapshot cached for that address
-  on the given UTC day (defaults to today, UTC, if `date` is omitted). Never triggers a fresh
-  GitHub Action run itself — if nothing was cached for that address on that day, it fails with
-  a `500` rather than silently returning a different day's data.
+* `GET /sui-holdings/{address}?date=YYYY-MM-DD` - This wallet's SUI + NAVI holdings as of a
+  given UTC day (defaults to today, UTC, if `date` is omitted), live or historical. On a
+  cache hit (whether from a prior `/sui-holdings-now` call or a prior call to this endpoint),
+  returns it immediately. On a miss, triggers the `sui-navi-report` repo's historical
+  reconstruction workflow — resuming from wherever this address's reconstruction previously
+  left off (or from genesis on a first request), which can take anywhere from under a minute
+  to several minutes depending on how much history needs to be walked. Every day crossed
+  along the way gets cached, including quiet days with no on-chain activity (which carry
+  forward the most recent known state), so a later request for any date in that range is a
+  fast cache hit rather than triggering reconstruction again. Returns `400` if the requested
+  date predates this wallet's earliest on-chain activity, `500` on an internal cache
+  inconsistency, `502` if the reconstruction run itself failed, and `503` if no GitHub token
+  is configured. See "Historical reconstruction" in the Migration section below for the
+  caching design, and `sui-navi-report`'s own `AGENTS.md` for how reconstruction itself
+  works.
 * `GET /openapi` - Interactive API documentation (Swagger UI).
 
 `{address}` must be a `0x`-prefixed, 40-hex-character EVM address.
@@ -341,6 +351,40 @@ ALTER TABLE `sui_holdings_cache`
 ALTER TABLE `sui_holdings_cache`
   MODIFY `id` bigint(20) NOT NULL AUTO_INCREMENT;
 
+-- Added to support GET /sui-holdings/{address}?date=... backfilling from the sui-navi-report
+-- reconstruction Action, in addition to live /sui-holdings-now/{address} snapshots. See
+-- "Historical reconstruction" below for why `as_of_date` has to be a separate column from
+-- `cached_at` rather than derived from it.
+ALTER TABLE `sui_holdings_cache`
+  ADD COLUMN `as_of_date` DATE NULL AFTER `address`,
+  ADD COLUMN `source` VARCHAR(16) NOT NULL DEFAULT 'live' AFTER `report_json`;
+
+UPDATE `sui_holdings_cache`
+  SET `as_of_date` = FROM_UNIXTIME(`cached_at`, '%Y-%m-%d')
+  WHERE `as_of_date` IS NULL;
+
+ALTER TABLE `sui_holdings_cache`
+  MODIFY `as_of_date` DATE NOT NULL;
+
+ALTER TABLE `sui_holdings_cache`
+  ADD KEY `address_as_of_date` (`address`, `as_of_date`);
+
+CREATE TABLE `sui_holdings_reconstruction_cursor` (
+  `id` bigint(20) NOT NULL,
+  `address` varchar(66) NOT NULL,
+  `checkpoint` bigint(20) NOT NULL,
+  `wallet_balances_json` longtext NOT NULL,
+  `cursor_date` DATE NOT NULL,
+  `updated_at` bigint(20) NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+ALTER TABLE `sui_holdings_reconstruction_cursor`
+  ADD PRIMARY KEY (`id`),
+  ADD KEY `address_updated_at` (`address`, `updated_at`);
+
+ALTER TABLE `sui_holdings_reconstruction_cursor`
+  MODIFY `id` bigint(20) NOT NULL AUTO_INCREMENT;
+
 CREATE TABLE `multichain_holdings_cache` (
   `id` bigint(20) NOT NULL,
   `address` varchar(42) NOT NULL,
@@ -371,6 +415,28 @@ the previous one, so a history of past snapshots builds up per address instead o
 ever keeping the latest. `cached_at` is a Unix timestamp (consistent with the other
 timestamp columns in this schema) rather than a `DATETIME`, so freshness (the 2-hour
 cache window) is a plain integer comparison in PHP.
+
+### Historical reconstruction: `as_of_date` vs `cached_at`, and the cursor table
+
+`as_of_date` is deliberately a separate column from `cached_at`, not derived from it at read
+time. For a live `/sui-holdings-now` snapshot the two always fall on the same calendar day
+(it's written the moment it's fetched), but for a backfilled historical snapshot they
+genuinely differ: a row backfilled *today* to represent September 14th, 2025 has
+`cached_at = now` (when the API actually wrote the row) and `as_of_date = 2025-09-14` (the
+date the data represents). Reusing `cached_at` for both, as the original schema did, would
+make every backfilled row look like it belongs to today — `getCacheForDate()` now queries
+`as_of_date` directly instead of deriving day boundaries from `cached_at`.
+
+`sui_holdings_reconstruction_cursor` is also append-only, for the same reason as
+`sui_holdings_cache` and everything else in this schema: no confirmed `UPDATE`/`UPSERT`
+support in the query builder used here, so instead of updating a row in place, each
+reconstruction run inserts a new cursor row and `SuiHoldingsCursorRepository` picks the most
+recent one per address in PHP (same aggregate-in-PHP pattern as `getFreshCache()`/
+`getCacheForDate()`). It stores just enough state to resume the sequential wallet-coin replay
+(`reconstruct.js`'s `newCursor.checkpoint` / `newCursor.balances`) plus `cursor_date`, the
+date reconstruction has been verified complete through — **not** derived from the cache
+table, since deriving "how far have we backfilled" from scattered cache rows would be far
+more fragile than just storing it directly as the single source of truth it is.
 
 `signed_amount` is stored as `decimal(40,0)` / `decimal(50,0)` (no decimal places: these are raw
 on-chain integer amounts, e.g. wei) rather than a PHP int/float, since wei-level amounts routinely
