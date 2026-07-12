@@ -228,15 +228,17 @@ API usage. Not practical to test by hitting the endpoint normally. If you need t
 logic, the honest way is to manually delete a cache row from the middle of an already-
 reconstructed range for a test wallet, then request that exact date.
 
-### Test 7 — resuming into a quiet window (the bug found above)
+### Test 7 — resuming into a quiet window (the bug found above) — CONFIRMED FIXED
 
 Request a date shortly after an existing cursor where the wallet had **no on-chain activity**
-in between (in the real case that found this bug: cursor at `2026-06-28`, request for
-`2026-07-07`, zero transactions in between). Before the fix, this incorrectly returned `400`
-predating-genesis for a wallet nine months into its history. After the fix, expect: `200`,
-`source: "reconstructed"`, a report identical to the `2026-06-28` snapshot except for
-`asOfDate`/`generatedAt`, and cache rows written for every day in between (not just the
-requested date) so the *next* request for any date in that range is a cache hit too.
+in between. Confirmed live in production after the fix: cursor at `2026-06-28`, requested
+`2026-07-07` (zero transactions in between, same scenario that originally found this bug).
+Result: `200`, `source: "reconstructed"`, `asOfDate: "2026-07-07"` — every single field in
+`wallet.coins[]` and `navi.positions[]` came back **byte-identical** to the `2026-06-28`
+snapshot (all 10 `main` positions, both `rwa` positions), with only `asOfDate` and
+`generatedAt` correctly differing. That's the exact predicted carry-forward behavior,
+confirmed against real data rather than just re-read from the code. Before the fix, this
+same request returned `400` predating-genesis instead.
 
 ### Not yet independently re-verified after the schema migration
 
