@@ -12,19 +12,22 @@ already hit and fixed, and concrete regression-test checklists with real validat
 * `GET /holdings/{address}` - Cached historical holdings for this address, as of today (UTC).
 * `GET /holdings/{address}?date=YYYY-MM-DD` - Cached historical holdings as of the given UTC day.
   **This is a pure cache lookup, not a live computation** — it never calls Zerion or does any
-  on-chain reads itself, only reads back what a prior `/holdings-now/{address}` call already
-  cached, from one of two sources, checked in this order: (1) the full `/holdings-now` response
-  cache (richer — includes the same `compound`/`aave`/`other` `defi` split as `/holdings-now`
-  itself — but only available for the single most recent date this address happened to be
-  fetched on, since that cache holds one row per address, not per-date history), falling back to
-  (2) Zerion-only position history (no `compound`/`aave`, just the flat Zerion `defi` list, but
-  covers any date this address was ever fetched on, since that cache genuinely accumulates a
-  row per day). The response's `source` field tells you which one served the request. A `404`
-  means neither source has anything cached for that exact date — there is currently no
-  historical reconstruction for dates that were never cached this way. An earlier
-  transaction-replay approach (walking each network's full history to derive a past balance) was
-  built, found to have real correctness problems, and has been removed; see `AGENTS.md` for what
-  was learned if reconstruction is attempted again with a different approach later.
+  on-chain reads itself, only reads back the full `/holdings-now` response cache for this address
+  (`compound`/`aave` DeFi positions included, same shape as `/holdings-now` itself) if that cache
+  happens to be from the exact requested UTC date. Since that cache holds only one row per
+  address (the latest `/holdings-now` fetch, overwritten every time), this endpoint effectively
+  only ever has a hit for the single most recent date this address was fetched on — **it is not
+  a multi-day history lookup**, only "was there a same-day snapshot." An earlier version of this
+  endpoint additionally fell back to Zerion-only position history (which does accumulate real
+  per-day history) to cover a wider date range, but that data never included `compound`/`aave`
+  positions — since those are a hard requirement here, not optional, that fallback was removed
+  rather than risk a response that looks complete but is silently missing DeFi positions. A `404`
+  means nothing is cached for that exact date. There is currently no historical reconstruction for
+  dates that were never cached this way — an earlier transaction-replay approach (walking each
+  network's full history to derive a past balance) was built, found to have real correctness
+  problems, and has been removed; see `AGENTS.md` for what was learned if reconstruction is
+  attempted again with a different approach later, and for the full reasoning behind dropping the
+  Zerion-only fallback.
 * `GET /holdings-now/{address}` - **Current** holdings and DeFi positions right now, powered by
   Zerion's portfolio API. Covers 60+ chains simultaneously (Ethereum, Base, Polygon, BNB, Avalanche
   and more) in two calls — wallet tokens/native coins in one, DeFi protocol positions in the other.
@@ -40,10 +43,10 @@ already hit and fixed, and concrete regression-test checklists with real validat
   entirely; once it's stale, everything is recomputed and re-cached. (Zerion's own data additionally
   has its own separate, shorter 10-minute cache used internally — see `ZerionPositionRepository` —
   which only matters when the outer 2-hour cache has just expired.) **This is also what populates
-  `/holdings`'s two cache sources** — every `/holdings-now` call caches both the full response
-  (address's single latest snapshot, including `compound`/`aave`) and the individual Zerion
-  positions (per-address-per-day, accumulating history), which `/holdings?date=...` later reads
-  back — see that endpoint's own description above for exactly how the two are used together.
+  `/holdings`'s cache** — every `/holdings-now` call overwrites this address's single cached
+  response (including `compound`/`aave`), which `/holdings?date=...` later reads back if its
+  requested date happens to match — see that endpoint's own description above for why this
+  means it only ever has a hit for one date per address, not multi-day history.
   Requires a Zerion API key in `config.php` (free tier: 2,000 requests/day, no credit card —
   register at [dashboard.zerion.io](https://dashboard.zerion.io/)); the on-chain `compound`/`aave`
   enrichment works without any config at all, using built-in public RPC defaults (overridable per
@@ -89,26 +92,33 @@ GET /holdings/0x1234567890123456789012345678901234567890?date=2026-06-15
 {
   "address": "0x1234567890123456789012345678901234567890",
   "date": "2026-06-15",
-  "source": "zerion_cache",
+  "source": "multichain_cache",
   "holdings": {
     "ethereum": {
       "native": { "symbol": "ETH", "amount": "1.5" },
       "tokens": [
         { "symbol": "USDC", "contract": "0xa0b8...", "amount": "500" }
       ],
-      "defi": []
+      "defi": { "compound": [], "aave": null, "other": [] }
     },
     "base": {
       "native": { "symbol": "ETH", "amount": "0.02" },
       "tokens": [],
-      "defi": []
+      "defi": {
+        "compound": { "base": "USDC", "market": "0xb125...", "supplied": "0", "borrowed": "7499.36", "collateral": [] },
+        "aave": null,
+        "other": []
+      }
     }
   }
 }
 ```
 
-If no `/holdings-now` call was ever made for this address on 2026-06-15, this returns a `404`
-instead — see the `/holdings` bullet above.
+This only returns data if `/holdings-now` for this address was called on exactly 2026-06-15 (UTC)
+— since the underlying cache holds one row per address, not per-date history, this is really
+"was there a same-day snapshot," not a general historical lookup. Any other date — including a
+date that genuinely had activity but wasn't the specific day `/holdings-now` happened to be
+called — returns a `404` instead. See the `/holdings` bullet above.
 
 ## Why `bcmath` isn't needed anywhere in this project
 
@@ -274,14 +284,18 @@ unique, and every fresh fetch overwrites the previous row (`ON DUPLICATE KEY UPD
 accumulating history -- there's no per-address history here, only ever "whenever this address was
 last fetched," and upserting keeps the table small regardless of query frequency.
 
-`/holdings?date=...` does read this table (`HoldingsNowCacheRepository::getCacheForDate()`), but
-only ever gets a hit for the single most recent date each address happens to have been fetched
-on, precisely because there's no history here to query by date. For any other date it falls back
-to `zerion_position` (via `ZerionPositionRepository::getPositionsForDate()`) instead, which stores
-individual positions with their own `fetched_at` timestamp and naturally accumulates history as
-`/holdings-now` gets called on different days -- that's what makes genuine per-date lookups
-possible, at the cost of not including the on-chain `compound`/`aave` data, which is only ever
-cached in `multichain_holdings_cache`, not `zerion_position`.
+`/holdings?date=...` reads this table (`HoldingsNowCacheRepository::getCacheForDate()`) and only
+this table -- it only ever gets a hit for the single most recent date each address happens to
+have been fetched on, precisely because there's no per-date history here, only "whenever this
+address was last fetched." An earlier version additionally fell back to `zerion_position` (via
+`ZerionPositionRepository::getPositionsForDate()`, since removed) for other dates, since that
+table genuinely accumulates a row per day as `/holdings-now` gets called over time -- but that
+data never included `compound`/`aave` positions, and since those are a hard requirement for
+`/holdings`, not optional, that fallback was removed rather than risk a response that looks
+complete but silently omits DeFi positions. See `AGENTS.md` Part 3 for the full reasoning.
+`zerion_position` remains in place and in active use -- just not by `/holdings` -- as
+`/holdings-now`'s own internal 10-minute rate-limit cache for Zerion API calls (see
+`ZerionPositionRepository`'s other methods).
 
 `sui_holdings_cache` is deliberately append-only: `address` is **not** unique, and every
 fresh fetch for `/sui-holdings-now/{address}` inserts a new row rather than overwriting

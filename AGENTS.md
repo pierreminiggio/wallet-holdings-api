@@ -453,29 +453,34 @@ history from a blockchain explorer API and replaying it. That system (`WalletSyn
 `WalletDataRepository`, `HoldingsCalculator`, `Network`, `EtherscanCompatibleClient` and its
 subclasses, plus the three database tables `wallet_sync`/`wallet_native_event`/
 `wallet_token_event`) has been removed entirely — it wasn't reliable enough to keep, see the
-lessons below. `/holdings` is now a pure cache lookup with no live computation at all, checking
-two sources in order: (1) `HoldingsNowCacheRepository::getCacheForDate()` — the full
-`/holdings-now` response cache, richer (includes the `{compound, aave, other}` `defi` split, same
-as `/holdings-now` itself) but only ever a hit for the single most recent date this address
-happened to be fetched on, since that table holds one row per address, not per-date history; then
-falling back to (2) `ZerionPositionRepository::getPositionsForDate()` — Zerion-only (no
-`compound`/`aave`, flat `defi` list), but genuinely accumulates a row per day, so it's the only
-source with real multi-day history. A miss on both returns a `404`. This also means `bcmath` is
-no longer used anywhere in this project (see bug #2 in Part 2, and "Why bcmath isn't needed
-anywhere in this project" in `README.md`) — the only two things that ever needed it are both gone
-now (the reconstruction system, and `AbiCodec`'s original `bcmath`-based implementation,
-separately rewritten — see Part 2).
+lessons below. `/holdings` is now a pure cache lookup with no live computation at all, and a
+single source: `HoldingsNowCacheRepository::getCacheForDate()` — the full `/holdings-now`
+response cache, including the `{compound, aave, other}` `defi` split, same as `/holdings-now`
+itself. A miss returns a `404`. This also means `bcmath` is no longer used anywhere in this
+project (see bug #2 in Part 2, and "Why bcmath isn't needed anywhere in this project" in
+`README.md`) — the only two things that ever needed it are both gone now (the reconstruction
+system, and `AbiCodec`'s original `bcmath`-based implementation, separately rewritten — see
+Part 2).
 
-**This two-source design has a real, inherent trade-off, not a bug to "fix" by picking one:**
-richer data (source 1) is only available for one date per address; genuine historical range
-(source 2) never has `compound`/`aave`. Don't be tempted to simplify this down to a single
-source — each one covers a case the other can't. If you want `compound`/`aave` on dates the
-multichain cache doesn't happen to cover, that requires either caching that enrichment
-per-date somewhere (not done currently — `multichain_holdings_cache` is deliberately a
-single-row-per-address upsert, not append-only, see its own class docblock for why) or
-recomputing live on-chain reads for a past date, which raises a real question of whether a
-*current* on-chain read is even meaningful as historical data for a genuinely past date — flag
-this rather than silently picking an answer if it comes up.
+**This single-source design is a deliberate, explicit trade-off made by the project owner —
+not an oversight, and not the obvious default.** An earlier version of this endpoint checked
+two sources: the multichain cache above, falling back to `ZerionPositionRepository
+::getPositionsForDate()` (Zerion-only position history, no `compound`/`aave`, but genuinely
+accumulating a row per day, so it covered any date the address was ever fetched on — real
+multi-day history, unlike the multichain cache's single row per address). That version was
+shown to the project owner and explicitly rejected: **DeFi positions are a hard requirement
+for this endpoint, not an optional nice-to-have** — a response that looks complete but is
+silently missing `compound`/`aave` data was judged worse than a `404`. So the Zerion-only
+fallback (and its now-unused `getPositionsForDate()` method) was removed entirely, and the
+explicitly-accepted cost is that `/holdings?date=X` now only ever has a hit for the single
+most recent date each address happens to have been fetched on via `/holdings-now` — not a
+general historical lookup, whatever the endpoint's name might suggest. **Do not
+reintroduce a Zerion-only (or any other DeFi-incomplete) fallback to "improve" date
+coverage without checking with the project owner first** — that's the exact trade-off
+already considered and rejected once. `zerion_position` and `ZerionPositionRepository`
+remain in place and in active use — just not by `/holdings` — as `/holdings-now`'s own
+internal 10-minute rate-limit cache for Zerion API calls; don't confuse "not used by
+`/holdings` anymore" with "safe to remove."
 
 ## Lessons from the removed reconstruction system, if attempting this again
 

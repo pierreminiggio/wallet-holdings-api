@@ -108,50 +108,6 @@ class ZerionPositionRepository
     }
 
     /**
-     * Retrieves all cached positions for this address for the given calendar date (UTC),
-     * using the most recent fetch from that date. Returns an empty array if no data exists
-     * for that date -- the caller treats empty as "no cache available, use reconstruction."
-     *
-     * @return list<ZerionPosition>
-     */
-    public function getPositionsForDate(string $address, string $date): array
-    {
-        // Find the most recent fetched_at on this calendar date for this address.
-        // Using DATE(fetched_at) = :date matches any time on that UTC day.
-        $rows = $this->fetcher->query(
-            $this->fetcher
-                ->createQuery(self::TABLE)
-                ->select('MAX(fetched_at) AS best_fetch')
-                ->where('address = :address AND DATE(fetched_at) = :date')
-            ,
-            [
-                'address' => strtolower($address),
-                'date' => $date
-            ]
-        );
-
-        if (! $rows || $rows[0]['best_fetch'] === null) {
-            return [];
-        }
-
-        $bestFetch = $rows[0]['best_fetch'];
-
-        $rows = $this->fetcher->query(
-            $this->fetcher
-                ->createQuery(self::TABLE)
-                ->select('chain_id, symbol, contract_address, position_type, protocol_id, amount')
-                ->where('address = :address AND fetched_at = :fetched_at')
-            ,
-            [
-                'address' => strtolower($address),
-                'fetched_at' => $bestFetch
-            ]
-        );
-
-        return $this->rowsToPositions($rows);
-    }
-
-    /**
      * Stores a batch of positions from a single Zerion API call, keyed by the
      * caller-supplied $fetchedAt timestamp (UTC, "YYYY-MM-DD HH:MM:SS").
      * ON DUPLICATE KEY UPDATE means re-fetching unchanged data is a safe no-op.
