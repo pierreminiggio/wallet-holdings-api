@@ -252,8 +252,14 @@ based on documentation or a web page — the same process that worked for Base:
    `defi` key). This step can be skipped entirely -- the defaults work out of the box -- unless
    you want your own provider (Alchemy/Infura/QuickNode) for a specific chain, e.g. because the
    public default is rate-limiting you.
-7. Ensure the `bcmath` PHP extension is enabled (used throughout for precise arbitrary-size
-   integer arithmetic on wei-level amounts, which exceed native PHP int/float precision)
+7. Ensure the `bcmath` PHP extension is enabled, **required only for `/holdings` (historical)** --
+   `HoldingsCalculator`/`WalletDataRepository` use it for precise arbitrary-size integer
+   arithmetic on wei-level amounts, which exceed native PHP int/float precision. Without it,
+   `/holdings` returns a clean `503` instead of working (see `App::requireBcmath()`).
+   `/holdings-now`'s on-chain `compound`/`aave` reads deliberately do **not** need this extension
+   -- `AbiCodec` implements the same kind of big-integer arithmetic using only native PHP string
+   manipulation (see `AbiCodec::bigMulAdd`/`hexToDec`/`formatUnits`), specifically so that
+   endpoint works without it.
 8. Run the migration below on your database
 9. Point your webserver's document root to `public/`, or use the provided `.htaccess` with Apache
 

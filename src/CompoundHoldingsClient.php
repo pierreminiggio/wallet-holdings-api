@@ -72,8 +72,8 @@ class CompoundHoldingsClient
                 continue;
             }
 
-            $hasPosition = bccomp($result['supplied'], '0') > 0
-                || bccomp($result['borrowed'], '0') > 0
+            $hasPosition = ! AbiCodec::isZero($result['supplied'])
+                || ! AbiCodec::isZero($result['borrowed'])
                 || ! empty($result['collateral']);
 
             if (! $hasPosition) {
@@ -151,7 +151,7 @@ class CompoundHoldingsClient
             $collWords = AbiCodec::words($collResult);
             $balance = AbiCodec::hexToDec($collWords[0]);
 
-            if (bccomp($balance, '0') <= 0) {
+            if (AbiCodec::isZero($balance)) {
                 continue;
             }
 

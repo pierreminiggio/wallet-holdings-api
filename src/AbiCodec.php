@@ -7,9 +7,10 @@ namespace App;
  * contract data via raw eth_call, without any web3 library dependency. Shared between
  * CompoundHoldingsClient and AaveHoldingsClient.
  *
- * Uses bcmath (not GMP) for arbitrary-precision integers, consistent with the rest of
- * this codebase (see WalletDataRepository / HoldingsCalculator), since wei-level amounts
- * exceed native PHP int/float precision.
+ * Deliberately uses only native PHP string/int arithmetic for its big-integer math (see
+ * bigMulAdd/hexToDec/formatUnits below) -- no bcmath or GMP extension required -- since
+ * wei-level amounts exceed native PHP int/float precision but this project's production
+ * environment doesn't have bcmath enabled.
  */
 class AbiCodec
 {
@@ -50,8 +51,40 @@ class AbiCodec
     }
 
     /**
-     * Convert a hex word (no 0x prefix) to a decimal string, using bcmath. No GMP
-     * dependency -- bcmath is already required elsewhere in this project.
+     * Multiplies a decimal-string integer by a small int (0-16 in practice here) and adds
+     * a small int (0-15), returning the result as a decimal string -- i.e. decimal*mul+add.
+     * Pure native PHP: manual long multiplication with carry, digit by digit. Since mul/add
+     * are always tiny constants (a hex digit's value and base 16), each per-digit operation
+     * stays well within native PHP int range regardless of how long $decimal is, so this
+     * works correctly for arbitrarily large numbers (e.g. full 256-bit values) without
+     * bcmath/GMP.
+     */
+    private static function bigMulAdd(string $decimal, int $mul, int $add): string
+    {
+        $carry = $add;
+        $result = '';
+
+        for ($i = strlen($decimal) - 1; $i >= 0; $i--) {
+            $product = ((int) $decimal[$i]) * $mul + $carry;
+            $result .= (string) ($product % 10);
+            $carry = intdiv($product, 10);
+        }
+
+        while ($carry > 0) {
+            $result .= (string) ($carry % 10);
+            $carry = intdiv($carry, 10);
+        }
+
+        $result = ltrim(strrev($result), '0');
+
+        return $result === '' ? '0' : $result;
+    }
+
+    /**
+     * Convert a hex word (no 0x prefix) to a decimal string, using only native PHP integer
+     * arithmetic (no bcmath/GMP extension required) -- see bigMulAdd() above. Builds the
+     * result the same way you'd do long multiplication by hand: for each hex digit,
+     * dec = dec*16 + digit.
      */
     public static function hexToDec(string $word): string
     {
@@ -62,20 +95,43 @@ class AbiCodec
         $dec = '0';
 
         for ($i = 0, $len = strlen($word); $i < $len; $i++) {
-            $dec = bcadd(bcmul($dec, '16'), (string) hexdec($word[$i]));
+            $dec = self::bigMulAdd($dec, 16, hexdec($word[$i]));
         }
 
         return $dec;
     }
 
-    /** Format a decimal-string integer with `decimals` decimal places, like ethers' formatUnits. */
+    /**
+     * True if a canonical (no leading zeros) decimal-string integer represents zero.
+     * Replaces bccomp($x, '0') === 0 without needing bcmath.
+     */
+    public static function isZero(string $decimal): bool
+    {
+        return ltrim($decimal, '0') === '';
+    }
+
+    /**
+     * Format a decimal-string integer with `decimals` decimal places, like ethers'
+     * formatUnits -- using only string slicing, no bcmath/GMP required. This works because
+     * the divisor here is always a power of 10 (10^decimals): dividing a base-10 string by
+     * 10^n is just "move the decimal point n digits from the right", which is exactly what
+     * slicing the string does -- no general big-integer division algorithm needed.
+     */
     public static function formatUnits(string $value, int $decimals): string
     {
-        $divisor = bcpow('10', (string) $decimals);
-        $whole = bcdiv($value, $divisor, 0);
-        $remainder = bcmod($value, $divisor);
-        $fraction = str_pad($remainder, $decimals, '0', STR_PAD_LEFT);
-        $fraction = rtrim($fraction, '0');
+        if ($decimals === 0) {
+            return $value;
+        }
+
+        // Left-pad so there are always at least `decimals + 1` digits, e.g. formatUnits('5', 6)
+        // needs to become "0.000005", so the string must be long enough to slice a whole part
+        // off the front at all.
+        $padded = str_pad($value, $decimals + 1, '0', STR_PAD_LEFT);
+
+        $whole = ltrim(substr($padded, 0, -$decimals), '0');
+        $whole = $whole === '' ? '0' : $whole;
+
+        $fraction = rtrim(substr($padded, -$decimals), '0');
 
         return $fraction === '' ? $whole : $whole . '.' . $fraction;
     }

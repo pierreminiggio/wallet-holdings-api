@@ -25,6 +25,11 @@ class AaveHoldingsClient
     private const SEL_GET_USER_ACCOUNT_DATA = '0xbf92857c';   // getUserAccountData(address)
     private const SEL_DECIMALS = '0x313ce567';                 // decimals()
 
+    // type(uint256).max, i.e. 2^256 - 1 -- Aave's sentinel for "infinite" health factor.
+    // See the comment where this is used, below.
+    private const MAX_UINT256 =
+        '115792089237316195423570985008687907853269984665640564039457584007913129639935';
+
     // Keyed the same way as Zerion's chain IDs (see ZerionPosition::$chainId) so
     // results merge cleanly under the same chain keys.
     private const POOLS = [
@@ -134,9 +139,9 @@ class AaveHoldingsClient
             $variableDebt = AbiCodec::hexToDec($w[2]);
             $usedAsCollateral = hexdec($w[8]) === 1;
 
-            $hasPosition = bccomp($supplied, '0') > 0
-                || bccomp($stableDebt, '0') > 0
-                || bccomp($variableDebt, '0') > 0;
+            $hasPosition = ! AbiCodec::isZero($supplied)
+                || ! AbiCodec::isZero($stableDebt)
+                || ! AbiCodec::isZero($variableDebt);
 
             if (! $hasPosition) {
                 continue;
@@ -167,11 +172,13 @@ class AaveHoldingsClient
 
         $aw = AbiCodec::words($accountRaw);
         $healthFactorRaw = AbiCodec::hexToDec($aw[5]);
-        $maxUint256 = bcsub(bcpow('2', '256'), '1');
         // Aave returns type(uint256).max for health factor when there's no debt ("infinite" --
         // can't be liquidated). Represented as null here rather than an astronomically large
         // number, so API consumers don't need to special-case a magic sentinel value themselves.
-        $healthFactor = bccomp($healthFactorRaw, $maxUint256) === 0
+        // Hardcoded rather than computed (2^256 - 1) since it's a fixed constant -- avoids
+        // needing bcmath/GMP just to derive a value that never changes. Plain string equality
+        // is exact here because AbiCodec::hexToDec never produces leading zeros.
+        $healthFactor = $healthFactorRaw === self::MAX_UINT256
             ? null
             : AbiCodec::formatUnits($healthFactorRaw, 18);
 

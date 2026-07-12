@@ -171,13 +171,14 @@ class App
     }
 
     /**
-     * Guards every endpoint that depends on bcmath (HoldingsCalculator, WalletDataRepository,
-     * AbiCodec/CompoundHoldingsClient/AaveHoldingsClient all use it for precise arbitrary-size
-     * integer arithmetic on wei-level amounts) so a missing extension fails with a clean JSON
-     * 503 instead of PHP dumping a raw fatal-error HTML stack trace into the response body --
-     * which is what a person calling this API actually hit in production before this guard
-     * existed (Call to undefined function App\bcadd()). Called at the very top of any handler
-     * that needs it, before any other work.
+     * Guards /holdings (historical), which still depends on bcmath via HoldingsCalculator /
+     * WalletDataRepository, so a missing extension fails with a clean JSON 503 instead of PHP
+     * dumping a raw fatal-error HTML stack trace into the response body -- which is what a
+     * person calling this API actually hit in production before this guard existed (Call to
+     * undefined function App\bcadd()). /holdings-now does NOT need this guard: AbiCodec /
+     * CompoundHoldingsClient / AaveHoldingsClient were deliberately written using only native
+     * PHP big-integer string arithmetic (see AbiCodec::bigMulAdd/hexToDec/formatUnits) instead
+     * of bcmath, specifically so that endpoint works without requiring the extension at all.
      *
      * @return bool True if bcmath is available and the caller should proceed; false if this
      *              already sent a 503 response and the caller must return immediately.
@@ -199,10 +200,6 @@ class App
 
     private function handleHoldingsNow(string $address): void
     {
-        if (! $this->requireBcmath()) {
-            return;
-        }
-
         if (! $this->isValidAddress($address)) {
             http_response_code(400);
             echo json_encode(['message' => 'Invalid wallet address']);
