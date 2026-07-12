@@ -11,10 +11,17 @@ already hit and fixed, and concrete regression-test checklists with real validat
 
 * `GET /holdings/{address}` - Cached historical holdings for this address, as of today (UTC).
 * `GET /holdings/{address}?date=YYYY-MM-DD` - Cached historical holdings as of the given UTC day.
-  **This is a pure cache lookup, not a live computation:** it returns Zerion-derived holdings
-  already cached by a prior `/holdings-now/{address}` call made for this address on the exact
-  requested UTC date, or a `404` if no such call was ever made on that date. There is currently
-  no historical reconstruction for dates that were never cached this way — an earlier
+  **This is a pure cache lookup, not a live computation** — it never calls Zerion or does any
+  on-chain reads itself, only reads back what a prior `/holdings-now/{address}` call already
+  cached, from one of two sources, checked in this order: (1) the full `/holdings-now` response
+  cache (richer — includes the same `compound`/`aave`/`other` `defi` split as `/holdings-now`
+  itself — but only available for the single most recent date this address happened to be
+  fetched on, since that cache holds one row per address, not per-date history), falling back to
+  (2) Zerion-only position history (no `compound`/`aave`, just the flat Zerion `defi` list, but
+  covers any date this address was ever fetched on, since that cache genuinely accumulates a
+  row per day). The response's `source` field tells you which one served the request. A `404`
+  means neither source has anything cached for that exact date — there is currently no
+  historical reconstruction for dates that were never cached this way. An earlier
   transaction-replay approach (walking each network's full history to derive a past balance) was
   built, found to have real correctness problems, and has been removed; see `AGENTS.md` for what
   was learned if reconstruction is attempted again with a different approach later.
@@ -33,13 +40,15 @@ already hit and fixed, and concrete regression-test checklists with real validat
   entirely; once it's stale, everything is recomputed and re-cached. (Zerion's own data additionally
   has its own separate, shorter 10-minute cache used internally — see `ZerionPositionRepository` —
   which only matters when the outer 2-hour cache has just expired.) **This is also what populates
-  `/holdings`'s cache** — every `/holdings-now` call caches Zerion positions per-address-per-day,
-  which `/holdings?date=...` later reads back for that exact date. Requires a Zerion API key in
-  `config.php` (free tier: 2,000 requests/day, no credit card — register at
-  [dashboard.zerion.io](https://dashboard.zerion.io/)); the on-chain `compound`/`aave` enrichment
-  works without any config at all, using built-in public RPC defaults (overridable per chain via
-  `config.php`'s `rpc` section). Neither `/holdings` nor `/holdings-now` require the `bcmath` PHP
-  extension — see "Why bcmath isn't needed anywhere in this project" below.
+  `/holdings`'s two cache sources** — every `/holdings-now` call caches both the full response
+  (address's single latest snapshot, including `compound`/`aave`) and the individual Zerion
+  positions (per-address-per-day, accumulating history), which `/holdings?date=...` later reads
+  back — see that endpoint's own description above for exactly how the two are used together.
+  Requires a Zerion API key in `config.php` (free tier: 2,000 requests/day, no credit card —
+  register at [dashboard.zerion.io](https://dashboard.zerion.io/)); the on-chain `compound`/`aave`
+  enrichment works without any config at all, using built-in public RPC defaults (overridable per
+  chain via `config.php`'s `rpc` section). Neither `/holdings` nor `/holdings-now` require the
+  `bcmath` PHP extension — see "Why bcmath isn't needed anywhere in this project" below.
 * `GET /sui-holdings-now/{address}` - **Current** SUI wallet coin holdings and NAVI
   Protocol lending/borrowing positions. `{address}` here is a 0x-prefixed,
   64-hex-character SUI address (not an EVM address). Serves a cached snapshot if one
@@ -262,17 +271,17 @@ holdings plus the per-chain on-chain `compound`/`aave` enrichment) for 2 hours p
 `HoldingsNowCacheRepository`, mirroring `sui_holdings_cache`'s `cached_at`-as-Unix-timestamp
 pattern. Unlike `sui_holdings_cache`, this table is deliberately **not** append-only: `address` is
 unique, and every fresh fetch overwrites the previous row (`ON DUPLICATE KEY UPDATE`) rather than
-accumulating history, since `/holdings-now` has no counterpart endpoint that reads a past cached
-snapshot by date the way `/sui-holdings` does for SUI -- there's no use case here for keeping old
-rows around, and upserting keeps the table small regardless of query frequency.
+accumulating history -- there's no per-address history here, only ever "whenever this address was
+last fetched," and upserting keeps the table small regardless of query frequency.
 
-Note this is a *different* table from `zerion_position`, which is what actually powers
-`/holdings?date=...`'s cache lookup (via `ZerionPositionRepository::getPositionsForDate()`).
-`zerion_position` stores individual positions with their own `fetched_at` timestamp and
-naturally accumulates history as `/holdings-now` gets called on different days, which is exactly
-what makes per-date lookups possible; `multichain_holdings_cache` only ever holds each address's
-single latest full response (including the on-chain `compound`/`aave` data, which `zerion_position`
-does not store) and isn't queried by date at all.
+`/holdings?date=...` does read this table (`HoldingsNowCacheRepository::getCacheForDate()`), but
+only ever gets a hit for the single most recent date each address happens to have been fetched
+on, precisely because there's no history here to query by date. For any other date it falls back
+to `zerion_position` (via `ZerionPositionRepository::getPositionsForDate()`) instead, which stores
+individual positions with their own `fetched_at` timestamp and naturally accumulates history as
+`/holdings-now` gets called on different days -- that's what makes genuine per-date lookups
+possible, at the cost of not including the on-chain `compound`/`aave` data, which is only ever
+cached in `multichain_holdings_cache`, not `zerion_position`.
 
 `sui_holdings_cache` is deliberately append-only: `address` is **not** unique, and every
 fresh fetch for `/sui-holdings-now/{address}` inserts a new row rather than overwriting

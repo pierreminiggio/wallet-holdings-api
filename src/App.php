@@ -76,12 +76,48 @@ class App
         $config = $this->loadConfig();
         $fetcher = $this->createDatabaseFetcher($config);
 
-        // This endpoint is currently a pure cache lookup: it returns Zerion positions
-        // already stored (by a prior /holdings-now call for this address made on the
-        // requested UTC day) and nothing else. There is deliberately no historical
-        // reconstruction here right now -- an earlier transaction-replay approach
-        // (walking each network's full tx history to derive a past balance) was tried
-        // and removed; see AGENTS.md if a reconstruction approach is revisited later.
+        // This endpoint is currently a pure cache lookup: it returns whatever a prior
+        // /holdings-now call for this address already cached, and nothing else. There is
+        // deliberately no historical reconstruction here right now -- an earlier
+        // transaction-replay approach (walking each network's full tx history to derive a
+        // past balance) was tried and removed; see AGENTS.md if a reconstruction approach
+        // is revisited later.
+        //
+        // Two possible cache sources, checked in this order:
+        //  1. multichain_holdings_cache -- the full /holdings-now response (richer: this is
+        //     the only place compound/aave on-chain positions are cached at all), but it's a
+        //     single row per address that gets overwritten on every fresh /holdings-now call,
+        //     so it only ever has a hit for whichever one date this address was *last*
+        //     fetched on -- not real per-date history.
+        //  2. zerion_position -- Zerion-only (no compound/aave), but genuinely accumulates a
+        //     row per day as things change, so it's the only source with real multi-day
+        //     history. Used as a fallback for any date the first check doesn't cover.
+        // See HoldingsNowCacheRepository's class docblock and AGENTS.md Part 3 for more.
+        $multichainCache = (new HoldingsNowCacheRepository($fetcher))->getCacheForDate($address, $targetDate);
+
+        if ($multichainCache !== null) {
+            $cachedResponse = json_decode($multichainCache['responseJson'], true);
+
+            $response = [
+                'address' => $address,
+                'date' => $targetDate,
+                'source' => 'multichain_cache',
+                'holdings' => $cachedResponse['holdings'] ?? []
+            ];
+
+            // Carry over any partial on-chain read failures from when this was originally
+            // cached (see CompoundHoldingsClient/AaveHoldingsClient's per-chain error
+            // handling) rather than silently dropping that information here.
+            if (! empty($cachedResponse['defi_errors'])) {
+                $response['defi_errors'] = $cachedResponse['defi_errors'];
+            }
+
+            http_response_code(200);
+            echo json_encode($response);
+
+            return;
+        }
+
         $zerionRepository = new ZerionPositionRepository($fetcher);
         $zerionPositions = $zerionRepository->getPositionsForDate($address, $targetDate);
 
@@ -97,7 +133,9 @@ class App
         }
 
         // Zerion uses its own chain ID strings (e.g. "ethereum", "base",
-        // "binance-smart-chain"), so those are returned directly.
+        // "binance-smart-chain"), so those are returned directly. Note this path's "defi"
+        // per chain is the flat Zerion-only list, unlike the multichain-cache path above --
+        // no compound/aave split here, since that enrichment was never cached for this date.
         $zerionByChain = $this->groupPositionsByChain($zerionPositions);
 
         http_response_code(200);
@@ -1201,25 +1239,37 @@ class App
                     ],
                     'HoldingsForDateResult' => [
                         'type' => 'object',
-                        'description' => 'Whatever was cached from a prior /holdings-now call for this address '
-                            . 'on this exact UTC date -- same per-chain "native"/"tokens"/"defi" shape as that '
-                            . 'endpoint\'s "holdings" key, except "defi" here is always the flat Zerion-sourced '
-                            . 'list (this endpoint does not additionally split it into compound/aave/other the '
-                            . 'way /holdings-now does).',
+                        'description' => 'Whatever was already cached for this address on this exact UTC date, '
+                            . 'from one of two possible sources (see the "source" field) -- this endpoint never '
+                            . 'computes anything live.',
                         'properties' => [
                             'address' => ['type' => 'string', 'example' => '0x1234...'],
                             'date' => ['type' => 'string', 'format' => 'date', 'example' => '2026-06-28'],
                             'source' => [
                                 'type' => 'string',
-                                'example' => 'zerion_cache',
-                                'description' => 'Where this cached data came from. Currently always '
-                                    . '"zerion_cache" -- the only source this endpoint has right now.'
+                                'enum' => ['multichain_cache', 'zerion_cache'],
+                                'description' => '"multichain_cache": from the full /holdings-now response '
+                                    . 'cache -- richer, each chain\'s "defi" is {compound, aave, other} same as '
+                                    . '/holdings-now itself. Only ever available for the single most recent date '
+                                    . 'this address happened to be fetched on (see HoldingsNowCacheRepository), '
+                                    . 'not genuine multi-day history. "zerion_cache": fallback used for any '
+                                    . 'other date, from Zerion-only position history -- each chain\'s "defi" is '
+                                    . 'the flat Zerion-sourced list only, with no compound/aave split.'
+                            ],
+                            'defi_errors' => [
+                                'type' => 'object',
+                                'nullable' => true,
+                                'description' => 'Only present when "source" is "multichain_cache" and that '
+                                    . 'cached response had partial on-chain read failures -- carried over as-is '
+                                    . 'from the original /holdings-now response. See CurrentHoldingsResult\'s '
+                                    . '"defi_errors" for the shape.'
                             ],
                             'holdings' => [
                                 'type' => 'object',
                                 'description' => 'Keyed by Zerion chain ID (e.g. "ethereum", "base", '
                                     . '"polygon", "binance-smart-chain"). Only chains with cached data for '
-                                    . 'this date appear.',
+                                    . 'this date appear. Shape of "defi" within each chain depends on "source" '
+                                    . '-- see that field\'s description above.',
                                 'additionalProperties' => [
                                     'type' => 'object',
                                     'properties' => [
@@ -1243,18 +1293,25 @@ class App
                                             ]
                                         ],
                                         'defi' => [
-                                            'type' => 'array',
-                                            'description' => 'Misc Zerion-sourced defi positions (staked, '
-                                                . 'locked, LP, etc.) cached for this chain on this date.',
-                                            'items' => [
-                                                'type' => 'object',
-                                                'properties' => [
-                                                    'symbol' => ['type' => 'string', 'example' => 'ETH'],
-                                                    'contract' => ['type' => 'string', 'nullable' => true],
-                                                    'amount' => ['type' => 'string', 'example' => '1.5'],
-                                                    'type' => ['type' => 'string', 'example' => 'staked'],
-                                                    'protocol' => ['type' => 'string', 'nullable' => true, 'example' => 'lido']
-                                                ]
+                                            'description' => 'Either the flat Zerion-only list (source: '
+                                                . 'zerion_cache) or the {compound, aave, other} object (source: '
+                                                . 'multichain_cache) -- see CurrentHoldingsResult\'s "defi" for '
+                                                . 'the latter\'s full shape.',
+                                            'oneOf' => [
+                                                [
+                                                    'type' => 'array',
+                                                    'items' => [
+                                                        'type' => 'object',
+                                                        'properties' => [
+                                                            'symbol' => ['type' => 'string', 'example' => 'ETH'],
+                                                            'contract' => ['type' => 'string', 'nullable' => true],
+                                                            'amount' => ['type' => 'string', 'example' => '1.5'],
+                                                            'type' => ['type' => 'string', 'example' => 'staked'],
+                                                            'protocol' => ['type' => 'string', 'nullable' => true, 'example' => 'lido']
+                                                        ]
+                                                    ]
+                                                ],
+                                                ['type' => 'object', 'description' => 'See CurrentHoldingsResult.holdings.<chain>.defi']
                                             ]
                                         ]
                                     ]

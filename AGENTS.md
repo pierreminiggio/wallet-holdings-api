@@ -453,23 +453,29 @@ history from a blockchain explorer API and replaying it. That system (`WalletSyn
 `WalletDataRepository`, `HoldingsCalculator`, `Network`, `EtherscanCompatibleClient` and its
 subclasses, plus the three database tables `wallet_sync`/`wallet_native_event`/
 `wallet_token_event`) has been removed entirely — it wasn't reliable enough to keep, see the
-lessons below. `/holdings` is now a pure read of `ZerionPositionRepository::getPositionsForDate()`
-— i.e. whatever `/holdings-now` already happened to cache for this exact address on this exact
-UTC date. A cache miss returns a `404`, not a live computation. This also means `bcmath` is no
-longer used anywhere in this project (see bug #2 in Part 2, and "Why bcmath isn't needed
-anywhere in this project" in `README.md`) — the only two things that ever needed it are both
-gone now (the reconstruction system, and `AbiCodec`'s original `bcmath`-based implementation,
+lessons below. `/holdings` is now a pure cache lookup with no live computation at all, checking
+two sources in order: (1) `HoldingsNowCacheRepository::getCacheForDate()` — the full
+`/holdings-now` response cache, richer (includes the `{compound, aave, other}` `defi` split, same
+as `/holdings-now` itself) but only ever a hit for the single most recent date this address
+happened to be fetched on, since that table holds one row per address, not per-date history; then
+falling back to (2) `ZerionPositionRepository::getPositionsForDate()` — Zerion-only (no
+`compound`/`aave`, flat `defi` list), but genuinely accumulates a row per day, so it's the only
+source with real multi-day history. A miss on both returns a `404`. This also means `bcmath` is
+no longer used anywhere in this project (see bug #2 in Part 2, and "Why bcmath isn't needed
+anywhere in this project" in `README.md`) — the only two things that ever needed it are both gone
+now (the reconstruction system, and `AbiCodec`'s original `bcmath`-based implementation,
 separately rewritten — see Part 2).
 
-**Known gap:** unlike `/holdings-now`, this endpoint's `defi` key per chain is still the flat
-Zerion-sourced list (whatever `ZerionPositionRepository::getPositionsForDate()` returns via
-`groupPositionsByChain()`) — it does **not** get the `{compound, aave, other}` restructuring
-that `/holdings-now` does. That restructuring only happens in `App::respondWithHoldingsNow()`,
-which this endpoint doesn't call. This was a deliberate scope decision (not asked for, and
-adding it means either storing that restructured shape too or recomputing on-chain reads for a
-historical date, which raises the question of whether a *current* on-chain read is even
-meaningful as historical data for a past date) rather than an oversight — flag it if picking
-this up, since it's an easy thing to assume already works and be wrong about.
+**This two-source design has a real, inherent trade-off, not a bug to "fix" by picking one:**
+richer data (source 1) is only available for one date per address; genuine historical range
+(source 2) never has `compound`/`aave`. Don't be tempted to simplify this down to a single
+source — each one covers a case the other can't. If you want `compound`/`aave` on dates the
+multichain cache doesn't happen to cover, that requires either caching that enrichment
+per-date somewhere (not done currently — `multichain_holdings_cache` is deliberately a
+single-row-per-address upsert, not append-only, see its own class docblock for why) or
+recomputing live on-chain reads for a past date, which raises a real question of whether a
+*current* on-chain read is even meaningful as historical data for a genuinely past date — flag
+this rather than silently picking an answer if it comes up.
 
 ## Lessons from the removed reconstruction system, if attempting this again
 
