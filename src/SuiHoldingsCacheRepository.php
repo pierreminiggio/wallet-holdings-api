@@ -27,7 +27,8 @@ class SuiHoldingsCacheRepository
      * younger than MAX_CACHE_AGE_SECONDS, or null otherwise (no cache at all yet, or
      * the newest one is too old). "Most recent" is picked in PHP rather than via a SQL
      * ORDER BY/LIMIT, since that support isn't confirmed to exist in the query builder
-     * used here (same reasoning as the in-PHP aggregation in WalletDataRepository).
+     * used here (same "aggregate in PHP, not SQL" reasoning used throughout this project
+     * wherever the query builder's capabilities aren't confirmed).
      *
      * @return array{reportJson: string, cachedAt: int}|null
      */

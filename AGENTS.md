@@ -1,12 +1,14 @@
 # AGENTS.md
 
-This file covers two independent feature areas of this API. Read only the section relevant to
+This file covers three independent feature areas of this API. Read only the section relevant to
 what you're touching — they don't share code or assumptions, beyond both living in `App.php`.
 
 1. **SUI holdings** (`GET /sui-holdings-now/{address}`, `GET /sui-holdings/{address}?date=...`)
    — see "Part 1" below.
 2. **`/holdings-now`'s on-chain `defi` enrichment** (Compound III + Aave V3, read directly from
    their contracts, no third-party API) — see "Part 2", further down.
+3. **`/holdings`'s cache-only historical lookup**, and lessons from the historical
+   reconstruction system that used to power it before it was removed — see "Part 3", at the end.
 
 ---
 
@@ -286,19 +288,21 @@ re-run that kind of test rather than trusting a code read.
 
 **2. This project's production server does not have the `bcmath` extension enabled, and it's
 not going to.** `AbiCodec`, `CompoundHoldingsClient`, and `AaveHoldingsClient` were originally
-written using `bcmath` (matching the pre-existing convention in `HoldingsCalculator`/
-`WalletDataRepository`), which crashed production with `Call to undefined function
-App\bcadd()` — a raw PHP fatal error leaking a stack trace into the API response. They were
-then rewritten to use **only native PHP string/int arithmetic** — see `AbiCodec::bigMulAdd()`
-(manual long multiplication for hex→decimal conversion) and `AbiCodec::formatUnits()` (string
-slicing, which works because the divisor is always a power of 10 here, so no general
-big-integer division is ever needed). This was verified correct by running the full test suite
-with `bcmath` forcibly disabled (`php -n`), including the 256-bit max-uint boundary case, not
-just by reasoning about it. **Do not reintroduce `bcadd`/`bcmul`/`bcdiv`/`bcmod`/`bccomp`/
-`bcpow`/`bcsub` anywhere in these three files** — that would silently reintroduce this exact
-crash. `App::requireBcmath()` still exists and is still wired to `/holdings` (historical),
-because `HoldingsCalculator`/`WalletDataRepository` — pre-existing code, not part of this work
-— still genuinely need it. It is deliberately **not** called from `handleHoldingsNow` anymore.
+written using `bcmath` (matching the pre-existing convention in the EVM transaction-replay
+reconstruction system that used to live behind `/holdings`), which crashed production with
+`Call to undefined function App\bcadd()` — a raw PHP fatal error leaking a stack trace into the
+API response. They were then rewritten to use **only native PHP string/int arithmetic** — see
+`AbiCodec::bigMulAdd()` (manual long multiplication for hex→decimal conversion) and
+`AbiCodec::formatUnits()` (string slicing, which works because the divisor is always a power of
+10 here, so no general big-integer division is ever needed). This was verified correct by
+running the full test suite with `bcmath` forcibly disabled (`php -n`), including the 256-bit
+max-uint boundary case, not just by reasoning about it. **Do not reintroduce `bcadd`/`bcmul`/
+`bcdiv`/`bcmod`/`bccomp`/`bcpow`/`bcsub` anywhere in these three files** — that would silently
+reintroduce this exact crash. (Update: the old reconstruction system — and with it, the only
+other `bcmath` dependency in this project, plus the `App::requireBcmath()` guard that used to
+protect it — has since been removed entirely; see "A previous EVM reconstruction attempt" in
+`README.md`. `bcmath` is not used anywhere in this codebase anymore, EVM or SUI side, which is
+one less thing to worry about if you're extending `AbiCodec` further.)
 
 **3. RPC URLs need a code-level default, not just a `config.example.php` entry.** The first
 version of this feature read RPC endpoints only from `$config['rpc']`. That works for a fresh
@@ -433,3 +437,71 @@ this was fully exercised, not just code-reviewed):
   debt; Aave V3 still supports stable-rate borrowing on some deployments, and that field has
   never been observed non-zero in practice, only exercised by construction (the decode logic
   treats it identically to `variableDebt`, so this is a low-risk gap, but it is a gap).
+
+---
+
+# Part 3 — `/holdings` (historical) is now a pure cache lookup
+
+This part is for an AI agent (or a human moving fast) picking up work on `GET
+/holdings/{address}?date=YYYY-MM-DD` later — including anyone asked to reintroduce historical
+reconstruction for it. Read this before touching the `/holdings` block in `App::run()`.
+
+## What it does now, in one paragraph
+
+`/holdings` used to derive historical balances itself, by fetching a wallet's full transaction
+history from a blockchain explorer API and replaying it. That system (`WalletSyncService`,
+`WalletDataRepository`, `HoldingsCalculator`, `Network`, `EtherscanCompatibleClient` and its
+subclasses, plus the three database tables `wallet_sync`/`wallet_native_event`/
+`wallet_token_event`) has been removed entirely — it wasn't reliable enough to keep, see the
+lessons below. `/holdings` is now a pure read of `ZerionPositionRepository::getPositionsForDate()`
+— i.e. whatever `/holdings-now` already happened to cache for this exact address on this exact
+UTC date. A cache miss returns a `404`, not a live computation. This also means `bcmath` is no
+longer used anywhere in this project (see bug #2 in Part 2, and "Why bcmath isn't needed
+anywhere in this project" in `README.md`) — the only two things that ever needed it are both
+gone now (the reconstruction system, and `AbiCodec`'s original `bcmath`-based implementation,
+separately rewritten — see Part 2).
+
+**Known gap:** unlike `/holdings-now`, this endpoint's `defi` key per chain is still the flat
+Zerion-sourced list (whatever `ZerionPositionRepository::getPositionsForDate()` returns via
+`groupPositionsByChain()`) — it does **not** get the `{compound, aave, other}` restructuring
+that `/holdings-now` does. That restructuring only happens in `App::respondWithHoldingsNow()`,
+which this endpoint doesn't call. This was a deliberate scope decision (not asked for, and
+adding it means either storing that restructured shape too or recomputing on-chain reads for a
+historical date, which raises the question of whether a *current* on-chain read is even
+meaningful as historical data for a past date) rather than an oversight — flag it if picking
+this up, since it's an easy thing to assume already works and be wrong about.
+
+## Lessons from the removed reconstruction system, if attempting this again
+
+These are specific, hard-won findings from building and then removing the previous system —
+worth not re-learning from scratch if reconstruction is revisited with a different approach:
+
+- **A blockchain explorer API returning an ambiguous "not fully indexed yet" status is a trap.**
+  Blockscout's legacy API can report internal transactions as not-yet-indexed for part of a
+  requested range in a way that's easy to conflate with "genuinely no internal transactions here."
+  Since incoming and outgoing transfers can both be missing from a partial result, treating it as
+  empty can produce either an understated or overstated balance — not a closer approximation,
+  just a different wrong number. Any reconstruction approach needs to treat this status as a hard
+  failure requiring no-data-returned, not a soft "assume zero and continue."
+- **Not every EVM chain has a working free/keyless historical data source at all.** Only Ethereum
+  and Base ever had one confirmed working end-to-end (Routescan for Ethereum with an Etherscan
+  fallback; Base needed a completely separate provider, its own Blockscout instance, since neither
+  Routescan nor Etherscan's free tier covers Base). Polygon and BNB Smart Chain were never
+  confirmed working against a live API despite looking supported on paper (Polygon returned
+  "chain not supported" from Routescan). Confirm a provider actually works for a specific chain
+  against a live call before assuming docs/pricing pages are accurate.
+- **A single data source can be capped well below what a busy wallet needs.** Normal
+  transactions, internal transactions, and token transfers were each capped at 10,000 records per
+  request by the upstream API, regardless of pagination — a wallet with more activity than that
+  in the requested range couldn't be fully reconstructed in one request at all.
+- **Free-tier upstream calls fail transiently often enough that retries are not optional**, and a
+  first-ever sync for an active wallet can involve enough sequential calls (with retries) to
+  exceed PHP's default execution time limit — whatever replaces this will need the same kind of
+  `set_time_limit(0)` treatment `App::run()` used to apply, scoped to just this endpoint rather
+  than globally.
+- **A provider-level failure can be wallet-specific, not just capacity-related.** One real
+  wallet's internal-transactions call failed consistently on Routescan with a generic error while
+  working fine for other wallets and other calls on the *same* wallet — confirmed as a genuine
+  upstream issue (not a bug in this code) by testing the identical query against Etherscan's
+  independent backend, which worked immediately. A single upstream provider, however reliable in
+  general, is not guaranteed reliable for every specific address.

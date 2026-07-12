@@ -4,7 +4,6 @@ namespace App;
 
 use PierreMiniggio\DatabaseConnection\DatabaseConnection;
 use PierreMiniggio\DatabaseFetcher\DatabaseFetcher;
-use PierreMiniggio\DatabaseFetcher\Exception\DatabaseFetcherException;
 
 class App
 {
@@ -46,21 +45,9 @@ class App
             return;
         }
 
-        // A first-ever sync for a wallet can involve many sequential upstream calls across
-        // 4 networks (each with its own short per-call timeout and a possible retry), which
-        // can add up to longer than PHP's default execution time limit. Since this work is
-        // legitimate (not a runaway loop) and the person querying has explicitly accepted
-        // that a first sync may take a while, the time limit is removed for this endpoint
-        // specifically rather than raised globally for every PHP script on the server.
-        set_time_limit(0);
-
         if (count($segments) !== 2 || $segments[0] !== self::HOLDINGS_ENDPOINT) {
             http_response_code(404);
 
-            return;
-        }
-
-        if (! $this->requireBcmath()) {
             return;
         }
 
@@ -83,119 +70,43 @@ class App
         }
 
         // "Today" isn't a meaningful cutoff for "what did the wallet hold on date X" if
-        // X is still in progress; treat an omitted date the same as today (UTC), and use
-        // the end of that UTC day as the cutoff so today's activity so far is included.
+        // X is still in progress; treat an omitted date the same as today (UTC).
         $targetDate = $requestedDate ?? gmdate('Y-m-d');
-        $untilTimestamp = $this->endOfDayTimestamp($targetDate);
 
         $config = $this->loadConfig();
         $fetcher = $this->createDatabaseFetcher($config);
 
-        // Zerion cache bypass: if we have positions stored from /holdings-now calls made
-        // on the requested date, use those directly rather than running the full
-        // transaction-replay reconstruction. This is both faster and more reliable (no
-        // risk of the internal-transaction indexing gaps that affect reconstruction on
-        // Base), and builds historical coverage naturally as /holdings-now is called
-        // frequently over time. Only bypasses networks that have Zerion cache -- any
-        // network not covered falls through to the reconstruction path below.
+        // This endpoint is currently a pure cache lookup: it returns Zerion positions
+        // already stored (by a prior /holdings-now call for this address made on the
+        // requested UTC day) and nothing else. There is deliberately no historical
+        // reconstruction here right now -- an earlier transaction-replay approach
+        // (walking each network's full tx history to derive a past balance) was tried
+        // and removed; see AGENTS.md if a reconstruction approach is revisited later.
         $zerionRepository = new ZerionPositionRepository($fetcher);
         $zerionPositions = $zerionRepository->getPositionsForDate($address, $targetDate);
 
-        if (! empty($zerionPositions)) {
-            // Group Zerion positions by chain -- Zerion uses its own chain ID strings
-            // (e.g. "ethereum", "base", "binance-smart-chain"), so we return those
-            // directly rather than mapping to Network::* constants.
-            $zerionByChain = $this->groupPositionsByChain($zerionPositions);
-
-            http_response_code(200);
-            echo json_encode([
-                'address' => $address,
-                'date' => $targetDate,
-                'source' => 'zerion_cache',
-                'holdings' => $zerionByChain
-            ]);
+        if (empty($zerionPositions)) {
+            http_response_code(404);
+            echo json_encode(['message' => 'No cached holdings found for ' . $address . ' on '
+                . $targetDate . '. This endpoint only serves dates already cached by a prior '
+                . 'call to /holdings-now/' . $address . ' made on that exact UTC day -- it does '
+                . 'not reconstruct historical data. Call /holdings-now/' . $address . ' to cache '
+                . "today's snapshot for future lookups."]);
 
             return;
         }
 
-        $repository = new WalletDataRepository($fetcher);
-        $calculator = new HoldingsCalculator();
-
-        $holdingsByNetwork = [];
-
-        try {
-            foreach (Network::ALL as $network) {
-                [$primaryClient, $fallbackClient] = $this->createClientsForNetwork($network, $config);
-                $syncService = new WalletSyncService($primaryClient, $fallbackClient, $repository, $calculator);
-
-                $syncResult = $syncService->syncUpTo($address, $network, $untilTimestamp);
-
-                if (is_string($syncResult)) {
-                    // Whichever client actually produced the final error (the fallback,
-                    // if one was configured and the primary's error was the kind that
-                    // triggers it; otherwise the primary itself) is the one whose debug
-                    // info is relevant to log.
-                    $erroringClient = $fallbackClient !== null && $syncResult === EtherscanCompatibleClient::ERROR_UPSTREAM
-                        ? $fallbackClient
-                        : $primaryClient;
-
-                    [$statusCode, $body] = $this->buildSyncErrorResponse($syncResult, $network, $erroringClient);
-                    http_response_code($statusCode);
-                    echo json_encode($body);
-
-                    return;
-                }
-
-                $holdingsByNetwork[$network] = $this->buildNetworkHoldings(
-                    $repository,
-                    $calculator,
-                    $address,
-                    $network,
-                    $targetDate,
-                    $untilTimestamp
-                );
-            }
-        } catch (DatabaseFetcherException $e) {
-            http_response_code(500);
-            echo json_encode(['message' => 'Database error']);
-
-            return;
-        }
+        // Zerion uses its own chain ID strings (e.g. "ethereum", "base",
+        // "binance-smart-chain"), so those are returned directly.
+        $zerionByChain = $this->groupPositionsByChain($zerionPositions);
 
         http_response_code(200);
         echo json_encode([
             'address' => $address,
             'date' => $targetDate,
-            'holdings' => $holdingsByNetwork
+            'source' => 'zerion_cache',
+            'holdings' => $zerionByChain
         ]);
-    }
-
-    /**
-     * Guards /holdings (historical), which still depends on bcmath via HoldingsCalculator /
-     * WalletDataRepository, so a missing extension fails with a clean JSON 503 instead of PHP
-     * dumping a raw fatal-error HTML stack trace into the response body -- which is what a
-     * person calling this API actually hit in production before this guard existed (Call to
-     * undefined function App\bcadd()). /holdings-now does NOT need this guard: AbiCodec /
-     * CompoundHoldingsClient / AaveHoldingsClient were deliberately written using only native
-     * PHP big-integer string arithmetic (see AbiCodec::bigMulAdd/hexToDec/formatUnits) instead
-     * of bcmath, specifically so that endpoint works without requiring the extension at all.
-     *
-     * @return bool True if bcmath is available and the caller should proceed; false if this
-     *              already sent a 503 response and the caller must return immediately.
-     */
-    private function requireBcmath(): bool
-    {
-        if (extension_loaded('bcmath')) {
-            return true;
-        }
-
-        http_response_code(503);
-        echo json_encode(['message' => 'This endpoint requires the PHP bcmath extension, which '
-            . 'is not enabled on this server. On Ubuntu/Debian: sudo apt install php-bcmath && '
-            . 'sudo phpenmod bcmath && sudo systemctl restart apache2 (adjust the last command '
-            . 'for your webserver).']);
-
-        return false;
     }
 
     private function handleHoldingsNow(string $address): void
@@ -710,138 +621,6 @@ class App
         return [502, ['message' => 'Could not retrieve portfolio data from Zerion.']];
     }
 
-    /**
-     * @return array{0: int, 1: array<string, mixed>}
-     */
-    private function buildSyncErrorResponse(string $errorCode, string $network, EtherscanCompatibleClient $client): array
-    {
-        if ($errorCode === EtherscanCompatibleClient::ERROR_INVALID_ADDRESS) {
-            return [400, ['message' => 'Invalid wallet address']];
-        }
-
-        if ($errorCode === EtherscanCompatibleClient::ERROR_RATE_LIMITED) {
-            return [503, ['message' => 'Rate limited by upstream source, please retry shortly']];
-        }
-
-        if ($errorCode === EtherscanCompatibleClient::ERROR_TRUNCATED) {
-            return [
-                502,
-                [
-                    'message' => 'This wallet has too much activity on ' . $network
-                        . ' to fully reconstruct in one request (upstream 10,000 record cap). '
-                        . 'Try a more recent date, or contact support to sync this wallet in smaller steps.'
-                ]
-            ];
-        }
-
-        if ($errorCode === EtherscanCompatibleClient::ERROR_NOT_YET_INDEXED) {
-            return [
-                503,
-                [
-                    'message' => 'The upstream explorer for ' . $network . ' reports that internal transactions '
-                        . 'for part of the needed date range are not fully indexed yet. Since incoming and '
-                        . 'outgoing transfers can both be missing from a partial result, using it could produce '
-                        . 'either an understated or an overstated balance -- not a closer approximation, just a '
-                        . 'different wrong number -- so no holdings are returned rather than risk an incorrect '
-                        . 'one. This has been observed to persist for the same block range rather than resolve '
-                        . 'quickly, so there is no reliable wait time to suggest.'
-                ]
-            ];
-        }
-
-        $debugInfo = $client->getLastRequestDebugInfo();
-        $action = $debugInfo['lastAction'] ?? 'unknown';
-        $provider = match (get_class($client)) {
-            EtherscanApiClient::class => 'Etherscan (fallback)',
-            BaseBlockscoutApiClient::class => 'Blockscout (Base)',
-            default => 'Routescan'
-        };
-
-        error_log(sprintf(
-            '%s upstream error on %s (action=%s, page=%s): httpCode=%d curlError=%s responseBody=%s',
-            $provider,
-            $network,
-            $action,
-            $debugInfo['lastPage'] ?? 'unknown',
-            $debugInfo['httpCode'],
-            $debugInfo['curlError'] !== '' ? $debugInfo['curlError'] : '(none)',
-            $debugInfo['responseBody'] !== null ? substr($debugInfo['responseBody'], 0, 500) : '(none)'
-        ));
-
-        return [
-            502,
-            [
-                'message' => 'Could not retrieve ' . $action . ' data for ' . $network . ' after retrying'
-                    . ($provider === 'Etherscan (fallback)' ? ' (including a fallback provider)' : '') . '. '
-                    . 'This can be ordinary transient upstream load, but a failure that persists across '
-                    . 'every available provider for one specific wallet (while the same call works for '
-                    . 'other wallets) can also indicate an upstream indexing issue specific to this address '
-                    . '-- in that case retrying later may still help eventually, but there is no further '
-                    . 'fallback available from this codebase. See the server log for the exact upstream '
-                    . 'response.'
-            ]
-        ];
-    }
-
-    /**
-     * Builds the (primary, fallback) client pair for a given network. Each network can have
-     * a different primary provider, since not every provider covers every chain (Routescan
-     * doesn't index Base at all, confirmed directly against its API, so Base needs its own
-     * dedicated primary -- Blockscout's Base instance -- rather than sharing Ethereum's
-     * Routescan+Etherscan pair).
-     *
-     * @return array{0: EtherscanCompatibleClient, 1: EtherscanCompatibleClient|null}
-     */
-    private function createClientsForNetwork(string $network, array $config): array
-    {
-        if ($network === Network::BASE) {
-            // No fallback configured yet for Base: Etherscan's free tier doesn't cover it
-            // either (confirmed directly: "Free API access is not supported for this
-            // chain"), so there's currently no second option if Blockscout itself has a
-            // persistent issue for a specific wallet, the same way Routescan did for one
-            // wallet on Ethereum.
-            return [new BaseBlockscoutApiClient(), null];
-        }
-
-        $etherscanApiKey = $config['etherscan']['api_key'] ?? '';
-        $fallbackClient = $etherscanApiKey !== '' ? new EtherscanApiClient($etherscanApiKey) : null;
-
-        return [new RoutescanApiClient(), $fallbackClient];
-    }
-
-    /**
-     * @return array{native: array{symbol: string, amount: string}, tokens: list<array{symbol: string, contract: string, amount: string}>}
-     */
-    private function buildNetworkHoldings(
-        WalletDataRepository $repository,
-        HoldingsCalculator $calculator,
-        string $address,
-        string $network,
-        string $targetDate,
-        int $untilTimestamp
-    ): array {
-        $nativeBalance = $repository->sumNativeBalance($address, $network, $untilTimestamp);
-        $tokenBalances = $repository->sumTokenBalances($address, $network, $untilTimestamp);
-
-        $tokens = [];
-
-        foreach ($tokenBalances as $token) {
-            $tokens[] = [
-                'symbol' => $token['tokenSymbol'],
-                'contract' => $token['tokenContract'],
-                'amount' => $calculator->toHumanAmount($token['balance'], $token['tokenDecimals'])
-            ];
-        }
-
-        return [
-            'native' => [
-                'symbol' => Network::nativeSymbol($network, $targetDate),
-                'amount' => $calculator->toHumanAmount($nativeBalance, 18)
-            ],
-            'tokens' => $tokens
-        ];
-    }
-
     private function isValidAddress(string $address): bool
     {
         return (bool) preg_match('/^0x[a-fA-F0-9]{40}$/', $address);
@@ -879,16 +658,6 @@ class App
         return $dateTime !== false && $dateTime->format('Y-m-d') === $date;
     }
 
-    /**
-     * Unix timestamp for 23:59:59 UTC on the given date, used as an inclusive cutoff so
-     * "holdings on 2024-01-15" includes everything that happened that day.
-     */
-    private function endOfDayTimestamp(string $date): int
-    {
-        return \DateTime::createFromFormat('Y-m-d H:i:s', $date . ' 23:59:59', new \DateTimeZone('UTC'))
-            ->getTimestamp();
-    }
-
     private function createDatabaseFetcher(array $config): DatabaseFetcher
     {
         $dbConfig = $config['db'];
@@ -912,17 +681,14 @@ class App
             'openapi' => '3.0.3',
             'info' => [
                 'title' => 'Wallet Holdings API',
-                'description' => 'Reconstructs what a wallet held, on a given date, by replaying its full '
-                    . 'transaction history rather than relying on a (paid-only) historical balance snapshot. '
-                    . 'Ethereum uses Routescan (Etherscan-compatible, keyless tier) as its primary source, with '
-                    . 'an optional Etherscan API fallback for calls that persistently fail on Routescan for a '
-                    . "specific wallet. Base uses its own Blockscout instance instead (Routescan doesn't index\n"
-                    . 'Base, and Etherscan\'s free tier excludes it too). Results are cached, so repeat queries '
-                    . 'for already-synced ranges never re-hit any upstream source.\n\n'
-                    . 'Currently Ethereum and Base are active. Polygon and BNB Smart Chain are not yet: each '
-                    . 'returned "chain not supported" from Routescan or was otherwise unverified against a live '
-                    . 'API and so is disabled for now (see Network::ALL) until each is individually confirmed '
-                    . 'working with some provider, the same way Ethereum and Base were.',
+                'description' => 'Live current holdings and DeFi positions for EVM and SUI wallets '
+                    . '(/holdings-now, /sui-holdings-now), plus historical lookups for both '
+                    . '(/holdings, /sui-holdings) served from whatever has already been cached by a prior '
+                    . 'live call on that exact date. For EVM wallets, /holdings is currently a pure cache '
+                    . 'lookup with no historical reconstruction: a date not already cached by a prior '
+                    . '/holdings-now call for that address returns a 404, rather than being computed on '
+                    . 'demand. (SUI historical lookups work differently -- see /sui-holdings below -- since '
+                    . 'that side has its own reconstruction mechanism via a separate GitHub Action.)',
                 'version' => '1.0.0'
             ],
             'paths' => [
@@ -1050,7 +816,12 @@ class App
                 ],
                 '/' . self::HOLDINGS_ENDPOINT . '/{address}' => [
                     'get' => [
-                        'summary' => 'Get a wallet\'s holdings across all supported networks on a given date',
+                        'summary' => 'Get a wallet\'s cached historical holdings for a given UTC date',
+                        'description' => 'Pure cache lookup, not a live computation: returns Zerion-derived '
+                            . 'holdings already cached by a prior /holdings-now/{address} call made for this '
+                            . 'address on the exact requested UTC date, or a 404 if no such call was ever made '
+                            . 'on that date. There is currently no historical reconstruction for dates that '
+                            . 'were never cached this way.',
                         'parameters' => [
                             [
                                 'name' => 'address',
@@ -1064,16 +835,16 @@ class App
                                 'in' => 'query',
                                 'required' => false,
                                 'schema' => ['type' => 'string', 'format' => 'date'],
-                                'description' => 'Date to reconstruct holdings for, in YYYY-MM-DD format. '
-                                    . 'Defaults to today (UTC) when omitted.'
+                                'description' => 'UTC date to look up cached holdings for, in YYYY-MM-DD '
+                                    . 'format. Defaults to today (UTC) when omitted.'
                             ]
                         ],
                         'responses' => [
                             '200' => [
-                                'description' => 'Holdings per network',
+                                'description' => 'Cached holdings for that date, grouped by chain',
                                 'content' => [
                                     'application/json' => [
-                                        'schema' => ['$ref' => '#/components/schemas/HoldingsResult']
+                                        'schema' => ['$ref' => '#/components/schemas/HoldingsForDateResult']
                                     ]
                                 ]
                             ],
@@ -1083,15 +854,9 @@ class App
                                     'application/json' => ['schema' => ['$ref' => '#/components/schemas/Error']]
                                 ]
                             ],
-                            '502' => [
-                                'description' => 'Could not retrieve data from the upstream source, '
-                                    . 'or the wallet has too much activity to fully reconstruct in one request',
-                                'content' => [
-                                    'application/json' => ['schema' => ['$ref' => '#/components/schemas/Error']]
-                                ]
-                            ],
-                            '503' => [
-                                'description' => 'Rate limited by the upstream source; retry shortly',
+                            '404' => [
+                                'description' => 'No cached holdings exist for this address on this date '
+                                    . '(no prior /holdings-now call was made for it on that exact UTC day)',
                                 'content' => [
                                     'application/json' => ['schema' => ['$ref' => '#/components/schemas/Error']]
                                 ]
@@ -1434,46 +1199,64 @@ class App
                             ]
                         ]
                     ],
-                    'HoldingsResult' => [
+                    'HoldingsForDateResult' => [
                         'type' => 'object',
+                        'description' => 'Whatever was cached from a prior /holdings-now call for this address '
+                            . 'on this exact UTC date -- same per-chain "native"/"tokens"/"defi" shape as that '
+                            . 'endpoint\'s "holdings" key, except "defi" here is always the flat Zerion-sourced '
+                            . 'list (this endpoint does not additionally split it into compound/aave/other the '
+                            . 'way /holdings-now does).',
                         'properties' => [
                             'address' => ['type' => 'string', 'example' => '0x1234...'],
-                            'date' => ['type' => 'string', 'format' => 'date', 'example' => '2024-01-15'],
+                            'date' => ['type' => 'string', 'format' => 'date', 'example' => '2026-06-28'],
+                            'source' => [
+                                'type' => 'string',
+                                'example' => 'zerion_cache',
+                                'description' => 'Where this cached data came from. Currently always '
+                                    . '"zerion_cache" -- the only source this endpoint has right now.'
+                            ],
                             'holdings' => [
                                 'type' => 'object',
-                                'description' => 'Keyed by network: currently ethereum and base. polygon and bnb '
-                                    . 'are temporarily disabled pending verification against a live upstream API '
-                                    . '(polygon was found to return "chain not supported" on Routescan despite '
-                                    . 'an earlier docs/page suggesting otherwise; bnb was never independently '
-                                    . 'confirmed at all). They will be re-added one at a time as each is '
-                                    . 'actually confirmed working with some provider.',
-                                'properties' => [
-                                    'ethereum' => ['$ref' => '#/components/schemas/NetworkHoldings'],
-                                    'base' => ['$ref' => '#/components/schemas/NetworkHoldings']
-                                    // 'polygon' => ['$ref' => '#/components/schemas/NetworkHoldings'],
-                                    // 'bnb' => ['$ref' => '#/components/schemas/NetworkHoldings'],
-                                ]
-                            ]
-                        ]
-                    ],
-                    'NetworkHoldings' => [
-                        'type' => 'object',
-                        'properties' => [
-                            'native' => [
-                                'type' => 'object',
-                                'properties' => [
-                                    'symbol' => ['type' => 'string', 'example' => 'ETH'],
-                                    'amount' => ['type' => 'string', 'example' => '1.2345']
-                                ]
-                            ],
-                            'tokens' => [
-                                'type' => 'array',
-                                'items' => [
+                                'description' => 'Keyed by Zerion chain ID (e.g. "ethereum", "base", '
+                                    . '"polygon", "binance-smart-chain"). Only chains with cached data for '
+                                    . 'this date appear.',
+                                'additionalProperties' => [
                                     'type' => 'object',
                                     'properties' => [
-                                        'symbol' => ['type' => 'string', 'example' => 'USDC'],
-                                        'contract' => ['type' => 'string', 'example' => '0xa0b8...'],
-                                        'amount' => ['type' => 'string', 'example' => '500.0']
+                                        'native' => [
+                                            'type' => 'object',
+                                            'nullable' => true,
+                                            'properties' => [
+                                                'symbol' => ['type' => 'string', 'example' => 'ETH'],
+                                                'amount' => ['type' => 'string', 'example' => '1.2345']
+                                            ]
+                                        ],
+                                        'tokens' => [
+                                            'type' => 'array',
+                                            'items' => [
+                                                'type' => 'object',
+                                                'properties' => [
+                                                    'symbol' => ['type' => 'string', 'example' => 'USDC'],
+                                                    'contract' => ['type' => 'string', 'example' => '0xa0b8...'],
+                                                    'amount' => ['type' => 'string', 'example' => '500.0']
+                                                ]
+                                            ]
+                                        ],
+                                        'defi' => [
+                                            'type' => 'array',
+                                            'description' => 'Misc Zerion-sourced defi positions (staked, '
+                                                . 'locked, LP, etc.) cached for this chain on this date.',
+                                            'items' => [
+                                                'type' => 'object',
+                                                'properties' => [
+                                                    'symbol' => ['type' => 'string', 'example' => 'ETH'],
+                                                    'contract' => ['type' => 'string', 'nullable' => true],
+                                                    'amount' => ['type' => 'string', 'example' => '1.5'],
+                                                    'type' => ['type' => 'string', 'example' => 'staked'],
+                                                    'protocol' => ['type' => 'string', 'nullable' => true, 'example' => 'lido']
+                                                ]
+                                            ]
+                                        ]
                                     ]
                                 ]
                             ]

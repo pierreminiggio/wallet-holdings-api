@@ -5,10 +5,11 @@ namespace App;
 /**
  * Fetches current wallet holdings and DeFi positions from Zerion's REST API, covering
  * all chains simultaneously in one call (60+ chains including Ethereum, Base, Polygon,
- * BNB, Avalanche, and more). This replaces the per-chain approach of the earlier
- * RoutescanCurrentBalanceClient + BlockscoutCurrentBalanceClient pairing with a single
- * unified source that's been confirmed to have correct, live data (e.g. correctly
- * reporting 0.004871 EURC on Base vs Blockscout's stale 210 EURC for the same wallet).
+ * BNB, Avalanche, and more). This replaced an earlier per-chain approach (a pair of
+ * Routescan/Blockscout "current balance" clients, one call per chain, since removed)
+ * with a single unified source that's been confirmed to have correct, live data (e.g.
+ * correctly reporting 0.004871 EURC on Base vs. the old approach's stale 210 EURC for
+ * the same wallet).
  *
  * Requires a Zerion API key (free tier: 2,000 requests/day, no credit card):
  * https://dashboard.zerion.io/

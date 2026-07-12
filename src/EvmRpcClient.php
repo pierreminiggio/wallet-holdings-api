@@ -5,8 +5,7 @@ namespace App;
 /**
  * Minimal read-only JSON-RPC client for EVM chains -- just eth_call, which is all
  * CompoundHoldingsClient and AaveHoldingsClient need. No web3 library dependency,
- * consistent with the rest of this project's from-scratch API clients (ZerionClient,
- * EtherscanCompatibleClient, etc.).
+ * consistent with the rest of this project's from-scratch API clients (see ZerionClient).
  */
 class EvmRpcClient
 {
