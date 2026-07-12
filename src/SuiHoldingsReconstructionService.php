@@ -140,17 +140,37 @@ class SuiHoldingsReconstructionService
             return;
         }
 
+        // Seed lastKnownReport from the already-cached report at the resume point, not from
+        // nothing. This matters specifically when resuming from an existing cursor and the
+        // new walk finds zero new transactions (a genuinely quiet window) -- reconstruct.js
+        // then returns an empty dailySnapshots, and without this seed, every day in the loop
+        // below would hit the "nothing known yet" branch and write nothing at all, while the
+        // cursor still advanced to targetDate as if it had. A real production run hit exactly
+        // this: cursor advanced from 2026-06-28 to 2026-07-07 with an unchanged checkpoint
+        // (correct -- no transactions happened), but zero cache rows were written for that
+        // whole range, and the immediate re-check for 2026-07-07 then wrongly reported
+        // OUTCOME_BEFORE_GENESIS -- a wallet nine months into its on-chain history reported as
+        // predating its own genesis, because the carry-forward loop had nothing to carry.
         $lastKnownReport = null;
+
+        if ($fromDateExclusive !== null) {
+            $priorCached = $this->cacheRepository->getCacheForDate($address, $fromDateExclusive);
+
+            if ($priorCached !== null) {
+                $lastKnownReport = json_decode($priorCached['reportJson'], true);
+            }
+        }
 
         for ($date = $startDate; $date <= $targetDate; $date = $this->addDays($date, 1)) {
             if (isset($snapshotsByDate[$date])) {
                 $lastKnownReport = $snapshotsByDate[$date];
             } elseif ($lastKnownReport === null) {
                 // Nothing known yet to carry forward -- this day is before the wallet's first
-                // ever activity (only possible when $fromDateExclusive is null, i.e. this is
-                // a from-genesis walk and $startDate already equals the first real snapshot's
-                // date, so this branch shouldn't actually trigger -- kept as a defensive
-                // guard rather than assumed away).
+                // ever activity. Only reachable now when $fromDateExclusive is null (a
+                // from-genesis walk) and $startDate already equals the first real snapshot's
+                // date, so in practice this branch is never actually taken -- kept as a
+                // defensive guard rather than assumed away, same reasoning as before, but no
+                // longer silently wrong for the resume case.
                 continue;
             }
 

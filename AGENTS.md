@@ -70,6 +70,35 @@ don't guess" applied to GraphQL) — no `UPDATE`/`UPSERT`, no confirmed `ORDER B
 `GROUP BY`, and now no multi-`where()` chaining. Assume nothing beyond what's already
 demonstrated working in this codebase.
 
+## Critical, hard-won bug: a quiet resume window wrote nothing, then wrongly advanced the cursor
+
+Found in production on a real request: a wallet with a cursor at `2026-06-28` was asked for
+`2026-07-07`. The Action correctly found zero new transactions in that window (confirmed via
+the workflow's own console output) and returned an unchanged checkpoint/balances with an
+**empty** `dailySnapshots` — entirely correct behavior on the Action side.
+
+The bug was in `SuiHoldingsReconstructionService::backfillAndAdvanceCursor()`: the
+day-by-day carry-forward loop seeded `$lastKnownReport` from `null`, only ever setting it
+from `reconstruct.js`'s own `dailySnapshots`. With `dailySnapshots` empty, every day in the
+range hit the "nothing known yet, skip" branch — writing **zero** cache rows, not even for
+the requested date itself. The method still advanced the cursor to the target date
+regardless. `resolve()` then re-checked the cache for that date, found nothing, and concluded
+`OUTCOME_BEFORE_GENESIS` — reporting a wallet nine months into its history as predating its
+own genesis.
+
+The fix: when resuming from an existing cursor (`$fromDateExclusive !== null`), seed
+`$lastKnownReport` from the **already-cached** report at that date
+(`$cacheRepository->getCacheForDate($address, $fromDateExclusive)`), not from `null`. A quiet
+window then correctly carries forward the last known state through every day up to the
+target, instead of silently writing nothing while still claiming the range was covered.
+
+**If you ever see a `400 predates the wallet's earliest on-chain activity` for a date that's
+obviously not near a wallet's genesis, suspect this exact failure mode first** — check
+whether the cursor immediately before it has an identical `checkpoint` to some later cursor
+row (the signature of "zero transactions found, but the backfill silently failed anyway").
+A stale bad cursor row from before this fix was found and manually deleted from production;
+if this regresses, check for orphaned cursor rows the same way.
+
 ## Architecture: five classes, how they fit together
 
 - **`SuiHoldingsCacheRepository`** — the cache table (`sui_holdings_cache`). `getFreshCache()`
@@ -198,6 +227,16 @@ covered — i.e. a genuine bug or manual data corruption, not something reachabl
 API usage. Not practical to test by hitting the endpoint normally. If you need to verify this
 logic, the honest way is to manually delete a cache row from the middle of an already-
 reconstructed range for a test wallet, then request that exact date.
+
+### Test 7 — resuming into a quiet window (the bug found above)
+
+Request a date shortly after an existing cursor where the wallet had **no on-chain activity**
+in between (in the real case that found this bug: cursor at `2026-06-28`, request for
+`2026-07-07`, zero transactions in between). Before the fix, this incorrectly returned `400`
+predating-genesis for a wallet nine months into its history. After the fix, expect: `200`,
+`source: "reconstructed"`, a report identical to the `2026-06-28` snapshot except for
+`asOfDate`/`generatedAt`, and cache rows written for every day in between (not just the
+requested date) so the *next* request for any date in that range is a cache hit too.
 
 ### Not yet independently re-verified after the schema migration
 
