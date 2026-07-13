@@ -5,18 +5,20 @@ namespace App;
 use PierreMiniggio\DatabaseFetcher\DatabaseFetcher;
 
 /**
- * Caches the full /holdings-now JSON response per address, so a request within the TTL
- * window returns instantly without re-calling Zerion or re-running the on-chain
- * Compound/Aave reads. Mirrors SuiHoldingsCacheRepository's pattern (same 2-hour TTL
- * constant name/value) used by /sui-holdings-now, for consistency.
+ * Stores successive full /holdings-now response snapshots per address (see
+ * App::handleHoldingsNow() / App::respondWithHoldingsNow()). Deliberately append-only --
+ * every fetch inserts a new row rather than overwriting the previous one -- so a history
+ * of snapshots builds up per address over time instead of only ever keeping the latest
+ * one. Mirrors SuiHoldingsCacheRepository's structure and reasoning exactly (same
+ * MAX_CACHE_AGE_SECONDS value, same as_of_date/source columns, same "aggregate most
+ * recent in PHP rather than SQL ORDER BY/LIMIT" pattern, since that support isn't
+ * confirmed to exist in the query builder used here), for consistency between the two.
  *
- * Unlike sui_holdings_cache (deliberately append-only, since /sui-holdings reads
- * historical snapshots by date), this is a single row per address that gets overwritten
- * on every fresh fetch -- there's no per-address history here, only ever "whenever this
- * address was last fetched." /holdings?date=X does read this table (getCacheForDate()),
- * but only ever gets a hit for the single most recent date each address happens to have
- * been fetched on; for any other date it falls back to zerion_position's genuine
- * multi-day history instead (see the /holdings block in App::run() and AGENTS.md Part 3).
+ * /holdings/{address}?date=X (see App.php's /holdings block) reads this table via
+ * getCacheForDate() and this table alone -- there is no separate Zerion-only cache
+ * anymore (ZerionPositionRepository and the zerion_position table it used were removed;
+ * see AGENTS.md Part 3 for why an earlier two-source design was simplified down to this
+ * single one).
  */
 class HoldingsNowCacheRepository
 {
@@ -31,8 +33,11 @@ class HoldingsNowCacheRepository
     }
 
     /**
-     * Returns the cached response for this address if one exists and is younger than
-     * MAX_CACHE_AGE_SECONDS, or null otherwise (no cache yet, or it's too old).
+     * Returns the most recently cached response for this address if one exists and is
+     * younger than MAX_CACHE_AGE_SECONDS, or null otherwise (no cache at all yet, or the
+     * newest one is too old). "Most recent" is picked in PHP rather than via a SQL ORDER
+     * BY/LIMIT, since that support isn't confirmed to exist in the query builder used here
+     * (same reasoning as SuiHoldingsCacheRepository::getFreshCache()).
      *
      * @return array{responseJson: string, cachedAt: int}|null
      */
@@ -47,26 +52,30 @@ class HoldingsNowCacheRepository
             ['address' => strtolower($address)]
         );
 
-        if (! $rows) {
+        $latest = null;
+
+        foreach ($rows as $row) {
+            $cachedAt = (int) $row['cached_at'];
+
+            if ($latest === null || $cachedAt > $latest['cachedAt']) {
+                $latest = ['responseJson' => $row['response_json'], 'cachedAt' => $cachedAt];
+            }
+        }
+
+        if ($latest === null || (time() - $latest['cachedAt']) > self::MAX_CACHE_AGE_SECONDS) {
             return null;
         }
 
-        $cachedAt = (int) $rows[0]['cached_at'];
-
-        if ((time() - $cachedAt) > self::MAX_CACHE_AGE_SECONDS) {
-            return null;
-        }
-
-        return ['responseJson' => $rows[0]['response_json'], 'cachedAt' => $cachedAt];
+        return $latest;
     }
 
     /**
-     * Returns the cached response for this address if its cached_at falls on the given UTC
-     * date, or null otherwise (no cache at all, or the cached row is from a different day).
-     * Unlike getFreshCache(), this ignores MAX_CACHE_AGE_SECONDS entirely -- a row can be
-     * "for" any date, old or new, since it's just whenever this address was last fetched.
-     * Used by /holdings?date=X, which -- unlike /holdings-now -- wants an exact-day match,
-     * not a freshness window.
+     * Returns the cached response for this address whose as_of_date exactly matches the
+     * given date, or null if none exists. Ignores MAX_CACHE_AGE_SECONDS entirely, unlike
+     * getFreshCache() -- a row "for" a given date is valid regardless of how old it is now.
+     * At most one write path (a live /holdings-now call) can currently produce a row for a
+     * given address+date, but the most recent by cached_at is still picked among same-day
+     * rows for robustness, same reasoning as SuiHoldingsCacheRepository::getCacheForDate().
      *
      * @return array{responseJson: string, cachedAt: int}|null
      */
@@ -76,40 +85,50 @@ class HoldingsNowCacheRepository
             $this->fetcher
                 ->createQuery(self::TABLE)
                 ->select('response_json, cached_at')
-                ->where('address = :address')
+                ->where('address = :address AND as_of_date = :as_of_date')
             ,
-            ['address' => strtolower($address)]
+            ['address' => strtolower($address), 'as_of_date' => $date]
         );
 
-        if (! $rows) {
-            return null;
+        $latest = null;
+
+        foreach ($rows as $row) {
+            $cachedAt = (int) $row['cached_at'];
+
+            if ($latest === null || $cachedAt > $latest['cachedAt']) {
+                $latest = ['responseJson' => $row['response_json'], 'cachedAt' => $cachedAt];
+            }
         }
 
-        $cachedAt = (int) $rows[0]['cached_at'];
-
-        if (gmdate('Y-m-d', $cachedAt) !== $date) {
-            return null;
-        }
-
-        return ['responseJson' => $rows[0]['response_json'], 'cachedAt' => $cachedAt];
+        return $latest;
     }
 
-    public function store(string $address, string $responseJson): void
+    /**
+     * @param string $asOfDate The calendar date (YYYY-MM-DD, UTC) this response represents.
+     *                         Currently always today, since /holdings-now only ever produces
+     *                         live snapshots -- but tracked as its own column (not derived
+     *                         from cached_at) for the same reason as sui_holdings_cache, in
+     *                         case a backfilled source is ever added later.
+     * @param string $source  'live' currently -- the only source that writes to this table.
+     *                        Kept as an explicit parameter (rather than hardcoded) to mirror
+     *                        SuiHoldingsCacheRepository::store()'s signature, in case a second
+     *                        source is introduced later the way SUI's 'reconstructed' was.
+     */
+    public function store(string $address, string $responseJson, string $asOfDate, string $source): void
     {
         $this->fetcher->exec(
             $this->fetcher
                 ->createQuery(self::TABLE)
                 ->insertInto(
-                    'address, response_json, cached_at',
-                    ':address, :response_json, :cached_at'
-                )
-                ->onDuplicateKeyUpdate(
-                    'response_json = :response_json, cached_at = :cached_at'
+                    'address, as_of_date, response_json, source, cached_at',
+                    ':address, :as_of_date, :response_json, :source, :cached_at'
                 )
             ,
             [
                 'address' => strtolower($address),
+                'as_of_date' => $asOfDate,
                 'response_json' => $responseJson,
+                'source' => $source,
                 'cached_at' => time()
             ]
         );

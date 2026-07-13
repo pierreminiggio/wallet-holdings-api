@@ -82,27 +82,27 @@ class App
         // (walking each network's full tx history to derive a past balance) was tried and
         // removed; see AGENTS.md if a reconstruction approach is revisited later.
         //
-        // Single source: multichain_holdings_cache (the full /holdings-now response cache).
-        // This is a deliberate choice, not an oversight -- an earlier version of this
-        // endpoint additionally fell back to zerion_position (Zerion-only position history,
-        // which genuinely accumulates a row per day, unlike this single-row-per-address
-        // cache) to cover a wider date range. That fallback was removed because its data
-        // never included compound/aave positions, and those are a hard requirement here, not
-        // an optional nice-to-have -- a response with holdings but silently missing defi
-        // positions is worse than a 404. The real trade-off this accepts: /holdings?date=X
-        // now only ever has a hit for the single most recent date each address happens to
-        // have been fetched on via /holdings-now, not genuine multi-day history. See
+        // Single source: multichain_holdings_cache (the full /holdings-now response cache,
+        // including compound/aave). This table is append-only (a new row per /holdings-now
+        // call, not an overwrite), same as sui_holdings_cache, so this genuinely can serve
+        // any past date -- but only a date on which /holdings-now actually happened to be
+        // called for this specific address; there is still no reconstruction for a date that
+        // was simply never fetched. An earlier version of this endpoint additionally fell
+        // back to zerion_position (Zerion-only position history, since removed entirely) to
+        // cover dates the (at the time, single-row-per-address) multichain cache couldn't.
+        // That fallback was removed because its data never included compound/aave positions,
+        // and those are a hard requirement here, not an optional nice-to-have -- a response
+        // with holdings but silently missing defi positions is worse than a 404. See
         // HoldingsNowCacheRepository's class docblock and AGENTS.md Part 3 for more.
         $multichainCache = (new HoldingsNowCacheRepository($fetcher))->getCacheForDate($address, $targetDate);
 
         if ($multichainCache === null) {
             http_response_code(404);
             echo json_encode(['message' => 'No cached holdings found for ' . $address . ' on '
-                . $targetDate . '. This endpoint only serves the single most recent date this '
-                . 'address was cached on by a prior call to /holdings-now/' . $address . ' -- it '
-                . 'does not reconstruct historical data, and does not keep multiple past dates '
-                . 'cached. Call /holdings-now/' . $address . ' to cache today\'s snapshot, then '
-                . 'query /holdings/' . $address . ' (or with today\'s date) for it.']);
+                . $targetDate . '. This endpoint only serves dates on which /holdings-now/'
+                . $address . ' was actually called -- it does not reconstruct historical data '
+                . 'for dates that were never fetched. Call /holdings-now/' . $address . ' to '
+                . "cache today's snapshot for future lookups."]);
 
             return;
         }
@@ -138,11 +138,11 @@ class App
 
         $config = $this->loadConfig();
         $fetcher = $this->createDatabaseFetcher($config);
+        $holdingsNowCache = new HoldingsNowCacheRepository($fetcher);
 
         // Whole-response cache: if a fresh-enough (< 2h) response was already computed
         // for this address -- including the on-chain Compound/Aave reads below, which
         // are by far the most expensive part -- return it as-is and skip everything else.
-        $holdingsNowCache = new HoldingsNowCacheRepository($fetcher);
         $freshCache = $holdingsNowCache->getFreshCache($address);
 
         if ($freshCache !== null) {
@@ -154,8 +154,7 @@ class App
 
         // Building a fresh response below can involve many sequential upstream calls
         // (Zerion, plus up to 5 chains x 30+ Aave reserves x 2 eth_calls each), which can
-        // add up to longer than PHP's default execution time limit -- same reasoning as
-        // App::run()'s set_time_limit(0) call for /holdings.
+        // add up to longer than PHP's default execution time limit.
         set_time_limit(0);
 
         $zerionApiKey = $config['zerion']['api_key'] ?? '';
@@ -169,50 +168,13 @@ class App
             return;
         }
 
-        $repository = new ZerionPositionRepository($fetcher);
-
-        // Rate-limit cache: if the last fetch for this address was within the TTL window,
-        // reuse cached Zerion data directly without hitting Zerion at all.
-        if ($repository->isCacheFresh($address)) {
-            $cachedPositions = $repository->getLatestPositions($address);
-            $lastFetchedAt = $repository->getLastFetchedAt($address);
-
-            $this->respondWithHoldingsNow(
-                $address,
-                $cachedPositions,
-                ['hit' => true, 'fetched_at' => $lastFetchedAt],
-                $config,
-                $holdingsNowCache
-            );
-
-            return;
-        }
-
-        // Cache is stale (or absent) -- call Zerion for fresh data.
         $client = new ZerionClient($zerionApiKey);
         $walletPositions = $client->getWalletPositions($address);
 
         if (is_string($walletPositions)) {
-            // Zerion failed. Fall back to same-day cache if available -- stale-but-today
-            // data is likely still close to correct. Yesterday's or older data is not
-            // offered as a fallback, since holdings can change materially overnight.
-            if ($repository->isCacheFromToday($address)) {
-                $cachedPositions = $repository->getLatestPositions($address);
-                $lastFetchedAt = $repository->getLastFetchedAt($address);
-
-                $this->respondWithHoldingsNow(
-                    $address,
-                    $cachedPositions,
-                    [
-                        'hit' => true,
-                        'fetched_at' => $lastFetchedAt,
-                        'warning' => 'Zerion call failed; returning stale same-day cache. '
-                            . 'Data may not reflect the most recent activity.'
-                    ],
-                    $config,
-                    $holdingsNowCache
-                );
-
+            if ($this->respondWithTodaysCacheFallback($holdingsNowCache, $address, 'Zerion call '
+                . 'failed; returning today\'s previously cached snapshot. Data may not reflect '
+                . 'the most recent activity.')) {
                 return;
             }
 
@@ -226,24 +188,9 @@ class App
         $defiPositions = $client->getDefiPositions($address);
 
         if (is_string($defiPositions)) {
-            // Same fallback logic as above for the DeFi call specifically.
-            if ($repository->isCacheFromToday($address)) {
-                $cachedPositions = $repository->getLatestPositions($address);
-                $lastFetchedAt = $repository->getLastFetchedAt($address);
-
-                $this->respondWithHoldingsNow(
-                    $address,
-                    $cachedPositions,
-                    [
-                        'hit' => true,
-                        'fetched_at' => $lastFetchedAt,
-                        'warning' => 'Zerion DeFi call failed; returning stale same-day cache. '
-                            . 'DeFi positions may not reflect the most recent activity.'
-                    ],
-                    $config,
-                    $holdingsNowCache
-                );
-
+            if ($this->respondWithTodaysCacheFallback($holdingsNowCache, $address, 'Zerion DeFi '
+                . 'call failed; returning today\'s previously cached snapshot. DeFi positions '
+                . 'may not reflect the most recent activity.')) {
                 return;
             }
 
@@ -254,25 +201,44 @@ class App
             return;
         }
 
-        // Both calls succeeded -- store the fresh Zerion data and return it.
         $allPositions = [...$walletPositions, ...$defiPositions];
-        $fetchedAt = gmdate('Y-m-d H:i:s');
 
-        try {
-            $repository->storePositions($address, $allPositions, $fetchedAt);
-        } catch (\Throwable $e) {
-            // A storage failure is non-fatal here: we have fresh data from Zerion and
-            // can return it even if we couldn't cache it. Log it but don't fail the request.
-            error_log('ZerionPositionRepository::storePositions failed: ' . $e->getMessage());
+        $this->respondWithHoldingsNow($address, $allPositions, $config, $holdingsNowCache);
+    }
+
+    /**
+     * On a Zerion failure, falls back to today's cached multichain_holdings_cache row (if
+     * one exists, whatever its freshness -- unlike getFreshCache()'s 2-hour window, this is
+     * "anything from today at all") rather than failing outright: stale-but-today data is
+     * likely still close to correct. Yesterday's or older data is not offered as a
+     * fallback, since holdings can change materially overnight -- same reasoning the
+     * now-removed ZerionPositionRepository::isCacheFromToday() used to apply.
+     *
+     * @return bool True if a fallback was available and the response has already been
+     *              sent; false if the caller must handle the error itself.
+     */
+    private function respondWithTodaysCacheFallback(
+        HoldingsNowCacheRepository $holdingsNowCache,
+        string $address,
+        string $warningMessage
+    ): bool {
+        $todayCache = $holdingsNowCache->getCacheForDate($address, gmdate('Y-m-d'));
+
+        if ($todayCache === null) {
+            return false;
         }
 
-        $this->respondWithHoldingsNow(
-            $address,
-            $allPositions,
-            ['hit' => false, 'fetched_at' => $fetchedAt],
-            $config,
-            $holdingsNowCache
-        );
+        $response = json_decode($todayCache['responseJson'], true);
+        $response['cache'] = [
+            'hit' => true,
+            'fetched_at' => gmdate('Y-m-d H:i:s', $todayCache['cachedAt']),
+            'warning' => $warningMessage
+        ];
+
+        http_response_code(200);
+        echo json_encode($response);
+
+        return true;
     }
 
     // Default RPC endpoints for CompoundHoldingsClient / AaveHoldingsClient, used for any
@@ -295,25 +261,22 @@ class App
      * (CompoundHoldingsClient / AaveHoldingsClient -- no third-party API, straight
      * eth_call reads), plus an "other" sub-key preserving whatever Zerion-sourced
      * misc-protocol positions (staking, LP, etc.) were there before. Also stores the
-     * fully-assembled response in the whole-response cache so the next call within the
-     * TTL window -- including this potentially-expensive on-chain enrichment -- is
-     * skipped entirely.
+     * fully-assembled response in the whole-response cache (as a new row -- see
+     * HoldingsNowCacheRepository, append-only) so the next call within the TTL window --
+     * including this potentially-expensive on-chain enrichment -- is skipped entirely.
      *
-     * Only called from the "successful" branches of handleHoldingsNow(); error
-     * responses (missing API key, Zerion failure with no usable fallback) are
-     * deliberately never cached, matching the existing precedent in this codebase
-     * (SuiHoldingsCacheRepository / handleSuiHoldingsNow only ever stores successful
-     * reports too).
+     * Only called after a genuinely fresh, successful Zerion fetch (see
+     * handleHoldingsNow) -- error responses (missing API key, Zerion failure with no
+     * usable fallback) are deliberately never cached, matching the existing precedent in
+     * this codebase (SuiHoldingsCacheRepository / handleSuiHoldingsNow only ever stores
+     * successful reports too).
      *
      * @param list<ZerionPosition> $positions
-     * @param array{hit: bool, fetched_at: ?string, warning?: string} $cacheInfo Zerion-level
-     *        cache info (distinct from, and nested inside, the outer whole-response cache).
      * @param array<string, mixed> $config
      */
     private function respondWithHoldingsNow(
         string $address,
         array $positions,
-        array $cacheInfo,
         array $config,
         HoldingsNowCacheRepository $holdingsNowCache
     ): void {
@@ -365,10 +328,13 @@ class App
             'aave' => $aave['errors']
         ], fn ($errors) => ! empty($errors));
 
+        $fetchedAt = gmdate('Y-m-d H:i:s');
+        $today = gmdate('Y-m-d');
+
         $response = [
             'address' => $address,
-            'as_of' => gmdate('Y-m-d'),
-            'cache' => $cacheInfo,
+            'as_of' => $today,
+            'cache' => ['hit' => false, 'fetched_at' => $fetchedAt],
             'holdings' => $byChain
         ];
 
@@ -379,10 +345,10 @@ class App
         $responseJson = json_encode($response);
 
         try {
-            $holdingsNowCache->store($address, $responseJson);
+            $holdingsNowCache->store($address, $responseJson, $today, 'live');
         } catch (\Throwable $e) {
-            // Same reasoning as the ZerionPositionRepository::storePositions catch
-            // above: a caching failure shouldn't fail a request that otherwise succeeded.
+            // A storage failure is non-fatal here: we have fresh data and can return it
+            // even if we couldn't cache it. Log it but don't fail the request.
             error_log('HoldingsNowCacheRepository::store failed: ' . $e->getMessage());
         }
 
@@ -838,11 +804,9 @@ class App
                         'description' => 'Pure cache lookup, not a live computation: returns whatever a prior '
                             . '/holdings-now/{address} call for this address already cached (including its '
                             . 'compound/aave on-chain defi positions), if that call happened to be made on the '
-                            . 'exact requested UTC date. Since /holdings-now\'s cache only ever holds one row '
-                            . 'per address (the latest fetch, overwritten each time), this only ever has a hit '
-                            . "for the single most recent date this address was fetched on -- it is not a "
-                            . 'multi-day history lookup, and there is no historical reconstruction for any '
-                            . 'other date.',
+                            . 'exact requested UTC date. /holdings-now\'s cache keeps a row per call (not just '
+                            . 'the latest), so any date this address was actually fetched on can be looked up '
+                            . 'here -- but there is no reconstruction for a date that was simply never fetched.',
                         'parameters' => [
                             [
                                 'name' => 'address',
@@ -877,9 +841,7 @@ class App
                             ],
                             '404' => [
                                 'description' => 'No cached holdings exist for this address on this exact date '
-                                    . '-- either no /holdings-now call was ever made for it, or it was made on '
-                                    . 'a different date than requested (only the single most recent fetch per '
-                                    . 'address is retained)',
+                                    . '-- /holdings-now was never called for this address on that UTC day',
                                 'content' => [
                                     'application/json' => ['schema' => ['$ref' => '#/components/schemas/Error']]
                                 ]

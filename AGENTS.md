@@ -270,11 +270,15 @@ raw `eth_call` (`CompoundHoldingsClient` / `AaveHoldingsClient`) — no third-pa
 part. `other` is whatever Zerion itself reported under that chain's `defi` (staking, LP, etc.,
 unrelated to Compound/Aave) — this is the *previous* behavior, preserved under a new name rather
 than removed. The **entire** `/holdings-now` response (Zerion holdings + this on-chain
-enrichment) is cached per address for 2 hours in `multichain_holdings_cache`
-(`HoldingsNowCacheRepository`), checked in `handleHoldingsNow` before any of the expensive work
-below runs at all. This is a separate, outer cache from Zerion's own internal 10-minute cache
-(`ZerionPositionRepository`) — the two don't know about each other; the outer one just wraps the
-whole computation, however it happened to be produced.
+enrichment) is cached in `multichain_holdings_cache` (`HoldingsNowCacheRepository`), checked in
+`handleHoldingsNow` before any of the expensive work below runs at all — a request within 2 hours
+of the most recent cached snapshot for this address returns it as-is; a request beyond that
+recomputes everything and appends a new snapshot. (An earlier version of this cache additionally
+sat in front of a separate inner cache, `ZerionPositionRepository`, giving Zerion's own data its
+own shorter 10-minute freshness window independent of the on-chain enrichment. That inner cache
+and the class itself have since been removed entirely — `multichain_holdings_cache` is now the
+only cache either `/holdings-now` or `/holdings` uses; see bug #6 below and Part 3 for the full
+history.)
 
 ## Critical, hard-won bugs — read before changing anything here
 
@@ -325,12 +329,43 @@ convenience, don't — that was already tried and explicitly rejected.
 source, not assumed.** Part 1's "no confirmed UPDATE/UPSERT" warning made this worth checking
 rather than assuming either way. The query builder (`neutronstars/database-sql`, pulled from
 its GitHub source directly since no local `vendor/` copy was available at the time) documents
-and supports exactly the pattern used in `HoldingsNowCacheRepository::store()`:
-`->insertInto(columns, placeholders)->onDuplicateKeyUpdate(assignments)`. This doesn't
-contradict Part 1's warning — it's a different, narrower claim: this *specific* single-row
-upsert pattern is confirmed, not a blanket "UPDATE works fine everywhere" conclusion. If you use
-a different UPDATE/UPSERT shape than this exact one, re-verify it the same way (check the
-library source directly) rather than assuming it also works.
+and supports exactly the pattern that was originally used in `HoldingsNowCacheRepository::
+store()`: `->insertInto(columns, placeholders)->onDuplicateKeyUpdate(assignments)`. This
+doesn't contradict Part 1's warning — it's a different, narrower claim: this *specific*
+single-row upsert pattern is confirmed, not a blanket "UPDATE works fine everywhere"
+conclusion. If you use a different UPDATE/UPSERT shape than this exact one, re-verify it the
+same way (check the library source directly) rather than assuming it also works. (Update:
+`store()` no longer actually uses this pattern — see bug #6 below, `multichain_holdings_cache`
+became append-only and `store()` is now a plain `insertInto()` with no `onDuplicateKeyUpdate()`
+at all. The finding above is still worth keeping in mind if an upsert is ever needed again
+somewhere in this project, just not a description of this method's current code.)
+
+**6. `multichain_holdings_cache` was changed from single-row-per-address to append-only, and
+`ZerionPositionRepository`/`zerion_position` were removed entirely — both on explicit
+direction from the project owner, after an intermediate design was shown and rejected.** The
+sequence, in case it's informative for how similar trade-off calls get made on this project:
+first, `/holdings-now`'s cache was a single upserted row per address (simple, small table) with
+a separate `ZerionPositionRepository`/`zerion_position` table giving `/holdings?date=X` a
+second, Zerion-only fallback source with genuine multi-day history (no `compound`/`aave`
+though). That two-source design was shown to the project owner and explicitly rejected: DeFi
+positions are a hard requirement for `/holdings`, not optional, so a fallback that could return
+holdings without them was judged worse than a `404` — see the first version of this note in an
+earlier revision of this file for that reasoning in full. The project owner then asked a
+further, different question: instead of accepting single-date-only coverage as the permanent
+trade-off, could `multichain_holdings_cache` itself just work the way `sui_holdings_cache`
+already does — append-only, with real multi-day history — removing the need for
+`zerion_position` as a fallback at all? It could, and this is what was actually built:
+`HoldingsNowCacheRepository` was rewritten to mirror `SuiHoldingsCacheRepository` exactly
+(same `as_of_date`/`source`/`cached_at` columns, same "most recent in PHP" pattern for
+`getFreshCache()`, same plain `insertInto()` for `store()` instead of `onDuplicateKeyUpdate()`),
+`/holdings-now` now always writes with `source = 'live'`, and `ZerionPositionRepository` plus
+the `zerion_position` table it owned (including `/holdings-now`'s own internal 10-minute Zerion
+rate-limit cache, which lived there too) were deleted outright — not just stopped being called
+from `/holdings`. **The lesson, if a similar "should we accept this trade-off or restructure to
+avoid it" question comes up again: the obvious/smaller-diff answer isn't always the one that
+gets picked, and it's worth actually asking rather than assuming the previously-documented
+trade-off is permanent** — it wasn't, here, once a cheaper way to avoid it entirely was
+identified. See Part 3 below for `/holdings`'s current behavior in full.
 
 ## Architecture: how the pieces fit together
 
@@ -351,18 +386,25 @@ library source directly) rather than assuming it also works.
   hardcoded, unlike Compound's per-chain market list), then reads each reserve's position via
   `getUserReserveData`, plus an aggregate summary via `getUserAccountData`. Same
   `{positions, errors}` shape as `CompoundHoldingsClient`.
-- **`HoldingsNowCacheRepository`** — the outer whole-response cache (`multichain_holdings_cache`
-  table). Deliberately **not** append-only, unlike `sui_holdings_cache` in Part 1: `address` is
-  unique, every fresh fetch overwrites the previous row via `onDuplicateKeyUpdate` (see bug #5
-  above), since there's no counterpart endpoint here that reads a past snapshot by date the way
-  `/sui-holdings` does.
-- **`App.php`** — `handleHoldingsNow` checks the outer cache first, then runs the existing
-  Zerion logic (unchanged), then calls `respondWithHoldingsNow` on every success path.
-  `respondWithHoldingsNow` merges `DEFAULT_RPC_URLS` with `config.php`'s overrides, calls both
-  clients, restructures each chain's `defi` key into `{compound, aave, other}` (including
-  synthesizing a chain entry for one that has a Compound/Aave position but zero Zerion-tracked
-  activity — see bug #4's fix), assembles the final response, stores it in the outer cache, and
-  echoes it. Only successful responses are cached — error paths (missing Zerion key, Zerion
+- **`HoldingsNowCacheRepository`** — the whole-response cache (`multichain_holdings_cache`
+  table). Append-only, same as `sui_holdings_cache` in Part 1 (see bug #6 above): every fresh
+  `/holdings-now` fetch inserts a new row rather than overwriting the previous one, tagged with
+  `as_of_date` and `source = 'live'`. `getFreshCache()` picks the most recent row by `cached_at`
+  in PHP (no confirmed `ORDER BY`/`LIMIT` support — same reasoning as
+  `SuiHoldingsCacheRepository`); `getCacheForDate()` does the same but filtered to an exact
+  `as_of_date` match, which is what `/holdings` uses (see Part 3). This is now the *only* cache
+  either `/holdings-now` or `/holdings` uses — `ZerionPositionRepository` (which used to give
+  Zerion's own data a separate inner 10-minute cache, and gave `/holdings` a second,
+  DeFi-incomplete fallback source) was removed entirely, not just stopped being called.
+- **`App.php`** — `handleHoldingsNow` checks `getFreshCache()` first; on a miss, it calls Zerion
+  directly (no inner cache layer anymore) and, on a Zerion failure, falls back to today's cached
+  row if one exists (`respondWithTodaysCacheFallback()`) before giving up and returning an
+  error. On success, it calls `respondWithHoldingsNow`, which merges `DEFAULT_RPC_URLS` with
+  `config.php`'s overrides, calls both on-chain clients, restructures each chain's `defi` key
+  into `{compound, aave, other}` (including synthesizing a chain entry for one that has a
+  Compound/Aave position but zero Zerion-tracked activity — see bug #4's fix), assembles the
+  final response, appends it to the cache via `store($address, $responseJson, $today, 'live')`,
+  and echoes it. Only successful responses are cached — error paths (missing Zerion key, Zerion
   failure with no usable fallback) are not, matching Part 1's caching precedent.
 
 ## Known limitations — real, not hypothetical, but out of scope so far
@@ -456,31 +498,32 @@ subclasses, plus the three database tables `wallet_sync`/`wallet_native_event`/
 lessons below. `/holdings` is now a pure cache lookup with no live computation at all, and a
 single source: `HoldingsNowCacheRepository::getCacheForDate()` — the full `/holdings-now`
 response cache, including the `{compound, aave, other}` `defi` split, same as `/holdings-now`
-itself. A miss returns a `404`. This also means `bcmath` is no longer used anywhere in this
-project (see bug #2 in Part 2, and "Why bcmath isn't needed anywhere in this project" in
-`README.md`) — the only two things that ever needed it are both gone now (the reconstruction
-system, and `AbiCodec`'s original `bcmath`-based implementation, separately rewritten — see
-Part 2).
+itself, and genuinely covering any date `/holdings-now` was ever called for that address (the
+cache is append-only — see bug #6 in Part 2 — not just the latest fetch). A miss returns a
+`404`. This also means `bcmath` is no longer used anywhere in this project (see bug #2 in Part
+2, and "Why bcmath isn't needed anywhere in this project" in `README.md`) — the only two things
+that ever needed it are both gone now (the reconstruction system, and `AbiCodec`'s original
+`bcmath`-based implementation, separately rewritten — see Part 2).
 
-**This single-source design is a deliberate, explicit trade-off made by the project owner —
-not an oversight, and not the obvious default.** An earlier version of this endpoint checked
-two sources: the multichain cache above, falling back to `ZerionPositionRepository
-::getPositionsForDate()` (Zerion-only position history, no `compound`/`aave`, but genuinely
-accumulating a row per day, so it covered any date the address was ever fetched on — real
-multi-day history, unlike the multichain cache's single row per address). That version was
-shown to the project owner and explicitly rejected: **DeFi positions are a hard requirement
-for this endpoint, not an optional nice-to-have** — a response that looks complete but is
-silently missing `compound`/`aave` data was judged worse than a `404`. So the Zerion-only
-fallback (and its now-unused `getPositionsForDate()` method) was removed entirely, and the
-explicitly-accepted cost is that `/holdings?date=X` now only ever has a hit for the single
-most recent date each address happens to have been fetched on via `/holdings-now` — not a
-general historical lookup, whatever the endpoint's name might suggest. **Do not
-reintroduce a Zerion-only (or any other DeFi-incomplete) fallback to "improve" date
-coverage without checking with the project owner first** — that's the exact trade-off
-already considered and rejected once. `zerion_position` and `ZerionPositionRepository`
-remain in place and in active use — just not by `/holdings` — as `/holdings-now`'s own
-internal 10-minute rate-limit cache for Zerion API calls; don't confuse "not used by
-`/holdings` anymore" with "safe to remove."
+**This design went through two rejected iterations before landing here — worth knowing the
+history if a similar question comes up again.** First attempt: check the multichain cache,
+falling back to `ZerionPositionRepository::getPositionsForDate()` (Zerion-only position
+history, no `compound`/`aave`, but with genuine multi-day coverage) for dates the multichain
+cache — at the time, a single row per address — didn't cover. Rejected: DeFi positions are a
+hard requirement for this endpoint, not optional, and a response that looks complete but
+silently omits them was judged worse than a `404`. Second attempt: keep the single-source
+design, drop the Zerion fallback, and accept the resulting limitation (only ever a hit for the
+one most recent date per address) as a permanent trade-off. This was *also* superseded, not
+because it was wrong exactly, but because a better option turned out to be available: rather
+than permanently accepting single-date-only coverage, `multichain_holdings_cache` itself was
+changed to be append-only (mirroring `sui_holdings_cache`), which gives genuine multi-day
+coverage **and** guarantees complete DeFi data simultaneously — no trade-off needed after all.
+`ZerionPositionRepository` and `zerion_position` were then removed entirely (not just stopped
+being called from `/holdings`) — see bug #6 in Part 2 for the full account. **The takeaway: an
+accepted trade-off documented in this file is not necessarily permanent** — if you find a
+design that removes a previously-necessary trade-off entirely rather than just picking a
+different side of it, that's worth surfacing even if this file says the trade-off was already
+"decided."
 
 ## Lessons from the removed reconstruction system, if attempting this again
 
