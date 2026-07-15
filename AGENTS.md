@@ -10,6 +10,13 @@ what you're touching — they don't share code or assumptions, beyond both livin
 3. **`/holdings`'s cache-only historical lookup**, and lessons from the historical
    reconstruction system that used to power it before it was removed — see "Part 3", at the end.
 
+**Extending historical reconstruction to EVM chains (multichain `/holdings`) is in progress.**
+Before writing any code for this, read `MULTICHAIN-HOLDINGS.md` in the repo root — it tracks
+every technique validated against a real wallet so far (per-chain RPC providers, genesis
+discovery methods, token-balance correctness pitfalls, Compound/Aave historical read
+constraints) and, just as importantly, what's still unresolved. Per that document's own rule:
+no implementation work starts until it has no unresolved items left.
+
 ---
 
 # Part 1 — SUI holdings
