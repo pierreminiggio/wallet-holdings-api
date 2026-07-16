@@ -18,6 +18,58 @@ Compound, and Aave positions on more than one chain).
 
 ---
 
+## ⚠️ CRITICAL — methodology bug found, invalidates prior "full coverage, zero results" claims
+
+**Discovered after real, independently-verified Aave transactions (via known tx hashes) turned out
+to be completely missed by a scan that had reported "full coverage, zero results" for that exact
+block range and event type.** This is a serious finding and must be fully resolved before trusting
+*any* zero-result conclusion elsewhere in this document.
+
+Two compounding problems, found together:
+
+1. **Off-by-one chunk sizing.** Every chunked scan script used in this project's testing computed
+   `to = from + 9999`, intending a "9999-block-per-call" step to stay under providers' block-range
+   caps. But `to = from + 9999` produces an inclusive range of **10,000 blocks** (`from` through
+   `from + 9999` is 10,000 numbers), not 9,999. On `drpc.org`, this silently exceeded the real cap
+   on at least one occasion (confirmed: a range of exactly 10,000 blocks was rejected with
+   `"ranges over 10000 blocks are not supported"`).
+2. **No real error detection.** Every scan script determined "found something" by checking whether
+   the raw HTTP response *contained the substring* `"blockNumber"`. This means an **error response**
+   (rate limit, range-too-large, malformed request, anything) and a **genuine empty result** were
+   indistinguishable to every script written this session. A failing chunk silently counted as "we
+   checked, nothing there" — with no visibility into how often this happened, on which chains, or
+   for which event types.
+3. **The "coverage self-check" didn't actually check coverage.** Every scan's self-verification
+   compared *expected total block count* against *summed block-count arithmetic from the loop* —
+   but that arithmetic runs regardless of whether the underlying RPC call for a given chunk actually
+   succeeded. A scan could (and evidently did) report "coverage confirmed, matches expected" while
+   some unknown number of its chunks had silently failed.
+
+**Attempting to fix the range size alone did not resolve the specific failing case** — a corrected,
+genuinely-9999-block-inclusive window still failed with the same error message. This suggests the
+real constraint may not be a fixed range size at all — possibly a request-volume/rate quota on the
+free tier (this session has made many thousands of `eth_getLogs` calls to `drpc.org` over its
+duration), mislabeled with the same generic error text as the range-size case. This needs proper
+isolation (e.g., wait and retry after a cooldown, test with a fresh/different provider, or test at a
+time with no other traffic) before concluding anything further.
+
+**Practical fixes required before any further scanning is trusted:**
+- Use `to = from + 9998` (or equivalent) for genuinely-9999-block-inclusive windows, and treat any
+  provider's stated cap as needing an explicit off-by-one check, not an assumed round number.
+- Every script must explicitly check for a JSON `"error"` key in each response and **halt or retry**
+  on error — never silently continue as if an error response were an empty result.
+- Every scan should log/count *failed* chunks separately from *empty* chunks, and refuse to report
+  "coverage confirmed" unless the failed-chunk count is zero.
+- **Every "full coverage, zero results" claim elsewhere in this document (Ethereum, BSC, Polygon —
+  all of them) is retroactively unverified** until re-run with the above fixes. This includes TR3
+  and NAFTY genesis discovery, Ethereum's Compound/Aave historical trend checks, and every "zero
+  ERC-20 activity" conclusion. None of these should be treated as settled until re-confirmed.
+
+This is now the top-priority item before any further chain is tested or any implementation work
+begins.
+
+---
+
 ## Core design conclusions (apply to every chain)
 
 1. **Split the problem by data shape, same as the SUI side did:**
@@ -116,20 +168,30 @@ Compound, and Aave positions on more than one chain).
 | Aave | ⚠️ Real gap found | Aave V3 **is** deployed on BSC (Pool: `0x6807dc923806fE8Fd134338EABCA509979a7e0cB`), confirmed via a real position on the test wallet ($110.64 collateral / $45.21 debt / 1.835 health factor, decoded and sane) — **but this project's existing `AaveHoldingsClient` has no BSC entry in its `POOLS` config at all.** This means `/holdings-now` is likely already under-reporting this wallet's BSC Aave position today, independent of anything to do with historical reconstruction. Worth fixing regardless of this feature's timeline. |
 | Compound | ✅ N/A | Compound III is not deployed on BSC (confirmed) — no work needed here. |
 
-### Polygon — in progress, one deep open mystery
+### Polygon — Aave mystery resolved (scanner bug, not a chain anomaly); broader re-verification now required
 
-| Item | Status | Notes |
-|---|---|---|
-| Free RPC | ✅ | `drpc.org`, keyless, archive-capable (verified against the wallet's own real balance change, not just a zero result). `eth_getLogs` capped at 10,000 blocks/call, same as Ethereum. NodeReal's endpoint pattern from BSC did not resolve for Polygon (DNS failure) — not investigated further since drpc already works. |
-| Native genesis | ✅ | Block 80,406,107 (Dec 16 2025, 22:18:19 UTC), tx-confirmed: 41.13 POL, single incoming deposit. Notably ~10 minutes before the wallet's first outgoing Polygon tx — consistent "fund then use" pattern. |
-| `eth_getLogs` mechanism itself | ✅ Verified working | A no-filter sanity check against a real recent block returned hundreds of genuine Transfer events — ruling out "the RPC call is broken" as an explanation for anything below. |
-| Token discovery (plain ERC-20 Transfers) | 🔴 **Unresolved anomaly** | **Every block of this chain's history has now been scanned** (0 → current, ~90.3M blocks, in multiple passes, each coverage-self-checked and matching exactly) for any ERC-20 Transfer touching this wallet, in either direction. Result: **zero**, always. |
-| Aave Supply/Borrow events (`onBehalfOf` = wallet) | 🔴 **Unresolved anomaly** | Same full-history coverage, checked directly against the Aave Pool contract for `Supply` and `Borrow` events with this wallet as `onBehalfOf`. Also **zero**, always. Event signatures were independently re-verified against Aave's actual GitHub source (`aave-v3-core`/`aave-v3-origin`) after two unrelated memory-based mistakes earlier in this project made blind trust in recalled signatures/addresses unwise — the signatures used were confirmed correct. The Pool contract address was independently re-confirmed via PolygonScan as the genuine canonical Aave V3 Pool (not a guess) — also confirmed correct. |
-| Yet: live Aave position | ✅ Real and *changing* | `getUserAccountData(wallet)` on that same, confirmed-correct Pool address returns a real, non-trivial, and demonstrably **live-changing** position across repeated reads (~$227 collateral / ~$112 debt as of one read, different numbers moments later) — so this isn't a stale/cached artifact. Aave's Pool contract genuinely has active state keyed to this exact address. |
-| **The contradiction** | Open | A real, active Aave position exists with (a) no ERC-20 Transfer ever touching the wallet, and (b) no Supply/Borrow event ever naming the wallet as `onBehalfOf`, across the *entire* chain's history, verified with self-checked full coverage more than once, including after closing a real race-condition (new blocks appearing between messages, confirmed and closed as a contributing factor to two earlier false "zero" scares, but not the final one). |
-| Next concrete lead (untested) | — | Aave's `IPool.sol` also defines a **`MintUnbacked`** event — a completely different event, used by Aave's **Portal** cross-chain bridging feature (`mintUnbacked`/`backUnbacked` in `BridgeLogic`), which can create a position on one chain as a result of an action taken on another. This has the same field shape as `Supply` but a different topic0, and has **not yet been checked**. This is the leading hypothesis and the next thing to test. |
-| Compound | ✅ Live-checked, zero | Direct `balanceOf` on the Comet USDC market returned zero — no reason to doubt this one, unlike the Transfer/Supply mystery, since it's a single direct point read rather than a derived historical scan. |
-| Aave historical reads (trend over time) | Blocked | Cannot proceed until the discovery mechanism above is understood — historical collateral/debt reads need to know *which* event/mechanism to trust as the source of truth for this wallet's Polygon Aave activity. |
+**Resolution:** the wallet's real Polygon Aave activity (confirmed via two independently-supplied
+real transaction hashes — a Borrow and a Supply, both decoding to exactly the expected event
+signature, exact Pool address, and exact wallet address in the `onBehalfOf` topic) fell inside the
+block range that was only ever affected by the off-by-one/error-swallowing bug described above.
+This was **not** a chain-level anomaly, a wrong signature, a wrong address, or an exotic Aave
+bridging mechanism — it was this project's own scanning methodology silently failing on real data.
+See the critical section at the top of this document for full detail and required fixes.
+
+One genuine, correct finding survived this investigation: **the "WBTC supply" transaction the
+account owner initially pointed to was actually a Compound (not Aave) collateral deposit**, to the
+same Polygon USDC Comet market already known from `CompoundHoldingsClient`'s config. This means the
+earlier "Compound on Polygon: live-checked, zero" conclusion was **incomplete** — it only checked
+the base asset's `balanceOf()`, never per-asset `userCollateral()` the way Ethereum's Compound check
+correctly did. This still needs to be redone properly (in progress).
+
+| Item | Status |
+|---|---|
+| Free RPC, native genesis, `eth_getLogs` mechanism itself | ✅ Still considered valid — these were direct point-reads or single-call sanity checks, not chunked scans, so unaffected by the bug above |
+| Token discovery (plain ERC-20 Transfers) | 🔴 Needs full re-scan with fixed chunking + real error detection |
+| Aave Supply/Borrow/MintUnbacked event scans | 🔴 Needs full re-scan — confirmed real events exist that a prior "complete" scan missed |
+| Aave live position (`getUserAccountData`) | ✅ Still valid — direct point read, unaffected |
+| Compound on Polygon | 🔴 Needs proper per-asset (`userCollateral`) check, not just base-asset `balanceOf` |
 
 ### Base — not started
 
