@@ -80,7 +80,9 @@ Compound, and Aave positions on more than one chain).
    already with a guessed `aEthWETH` address that turned out not to be a
    deployed contract at all.)
 
-8. **All chunked/bisection scripts must self-verify.** Every scan script
+8. **A DeFi position is not guaranteed to trace back to a standard Supply/Borrow event or a plain ERC-20 Transfer.** Aave in particular has a distinct `MintUnbacked`/Portal bridging pathway that can create position state on a chain without either. Any discovery approach that assumes "every position starts with a Transfer or a Supply/Borrow event" needs to also account for this, or it will systematically miss real positions the way it did during testing on Polygon (see that chain's section below for the specific unresolved case this was discovered through).
+
+9. **All chunked/bisection scripts must self-verify.** Every scan script
    should track total blocks covered vs. expected range size and flag a
    mismatch explicitly. This caught two real scanning bugs during testing
    (a wrong loop-iteration-count assumption, and an unvalidated bisection
@@ -114,15 +116,20 @@ Compound, and Aave positions on more than one chain).
 | Aave | ⚠️ Real gap found | Aave V3 **is** deployed on BSC (Pool: `0x6807dc923806fE8Fd134338EABCA509979a7e0cB`), confirmed via a real position on the test wallet ($110.64 collateral / $45.21 debt / 1.835 health factor, decoded and sane) — **but this project's existing `AaveHoldingsClient` has no BSC entry in its `POOLS` config at all.** This means `/holdings-now` is likely already under-reporting this wallet's BSC Aave position today, independent of anything to do with historical reconstruction. Worth fixing regardless of this feature's timeline. |
 | Compound | ✅ N/A | Compound III is not deployed on BSC (confirmed) — no work needed here. |
 
-### Polygon — in progress, one open discrepancy
+### Polygon — in progress, one deep open mystery
 
 | Item | Status | Notes |
 |---|---|---|
 | Free RPC | ✅ | `drpc.org`, keyless, archive-capable (verified against the wallet's own real balance change, not just a zero result). `eth_getLogs` capped at 10,000 blocks/call, same as Ethereum. NodeReal's endpoint pattern from BSC did not resolve for Polygon (DNS failure) — not investigated further since drpc already works. |
 | Native genesis | ✅ | Block 80,406,107 (Dec 16 2025, 22:18:19 UTC), tx-confirmed: 41.13 POL, single incoming deposit. Notably ~10 minutes before the wallet's first outgoing Polygon tx — consistent "fund then use" pattern. |
-| Token discovery | 🔴 **Contradicted — unresolved** | A full coverage-checked scan across the wallet's entire active range (block 80,406,107 → current) found **zero** ERC-20 Transfer events. But a direct, independent `getUserAccountData` read against Aave's Polygon Pool shows a real, non-trivial position ($227.78 collateral / $112.61 debt / 1.578 health factor) — which is impossible without the wallet having received an ERC-20 token at some point. **The log scan result cannot be trusted as-is.** Not yet diagnosed: could be a malformed request silently returning an empty-but-valid result, an encoding issue specific to this chain, or something else. This is the top priority before Polygon can be considered proven. |
-| Compound | Live-checked, zero | Direct `balanceOf` on the Comet USDC market returned zero — consistent (no reason to doubt this one, unlike the log-scan result, since it's a direct point read not a derived scan). |
-| Aave historical reads | Not yet tested | Live position confirmed real (see above); historical trend across dates not yet attempted — blocked on resolving the token-discovery scan issue first, since token collateral history needs the same `balanceOf`-at-block technique. |
+| `eth_getLogs` mechanism itself | ✅ Verified working | A no-filter sanity check against a real recent block returned hundreds of genuine Transfer events — ruling out "the RPC call is broken" as an explanation for anything below. |
+| Token discovery (plain ERC-20 Transfers) | 🔴 **Unresolved anomaly** | **Every block of this chain's history has now been scanned** (0 → current, ~90.3M blocks, in multiple passes, each coverage-self-checked and matching exactly) for any ERC-20 Transfer touching this wallet, in either direction. Result: **zero**, always. |
+| Aave Supply/Borrow events (`onBehalfOf` = wallet) | 🔴 **Unresolved anomaly** | Same full-history coverage, checked directly against the Aave Pool contract for `Supply` and `Borrow` events with this wallet as `onBehalfOf`. Also **zero**, always. Event signatures were independently re-verified against Aave's actual GitHub source (`aave-v3-core`/`aave-v3-origin`) after two unrelated memory-based mistakes earlier in this project made blind trust in recalled signatures/addresses unwise — the signatures used were confirmed correct. The Pool contract address was independently re-confirmed via PolygonScan as the genuine canonical Aave V3 Pool (not a guess) — also confirmed correct. |
+| Yet: live Aave position | ✅ Real and *changing* | `getUserAccountData(wallet)` on that same, confirmed-correct Pool address returns a real, non-trivial, and demonstrably **live-changing** position across repeated reads (~$227 collateral / ~$112 debt as of one read, different numbers moments later) — so this isn't a stale/cached artifact. Aave's Pool contract genuinely has active state keyed to this exact address. |
+| **The contradiction** | Open | A real, active Aave position exists with (a) no ERC-20 Transfer ever touching the wallet, and (b) no Supply/Borrow event ever naming the wallet as `onBehalfOf`, across the *entire* chain's history, verified with self-checked full coverage more than once, including after closing a real race-condition (new blocks appearing between messages, confirmed and closed as a contributing factor to two earlier false "zero" scares, but not the final one). |
+| Next concrete lead (untested) | — | Aave's `IPool.sol` also defines a **`MintUnbacked`** event — a completely different event, used by Aave's **Portal** cross-chain bridging feature (`mintUnbacked`/`backUnbacked` in `BridgeLogic`), which can create a position on one chain as a result of an action taken on another. This has the same field shape as `Supply` but a different topic0, and has **not yet been checked**. This is the leading hypothesis and the next thing to test. |
+| Compound | ✅ Live-checked, zero | Direct `balanceOf` on the Comet USDC market returned zero — no reason to doubt this one, unlike the Transfer/Supply mystery, since it's a single direct point read rather than a derived historical scan. |
+| Aave historical reads (trend over time) | Blocked | Cannot proceed until the discovery mechanism above is understood — historical collateral/debt reads need to know *which* event/mechanism to trust as the source of truth for this wallet's Polygon Aave activity. |
 
 ### Base — not started
 
