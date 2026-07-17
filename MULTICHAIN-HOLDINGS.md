@@ -169,7 +169,20 @@ begins.
 
 ## Chain-by-chain status
 
-### Ethereum — mostly closed
+### Ethereum — mostly closed, token discovery now re-verified with real error detection
+
+**Re-verification (using NodeReal, confirmed-real ~50,000-block cap, genuine per-chunk error
+detection — see the critical section above for why this was necessary):**
+
+| Range | Chunks | Failed chunks | Result |
+|---|---|---|---|
+| Native genesis → first outgoing tx (13,024,431 → 23,515,214) | 210 | 0 | Zero ERC-20 transfers — re-confirmed |
+| Block 0 → native genesis (0 → 13,024,430) | 261 | 0 | TR3's genesis transfer found, identical to original discovery, nothing else — re-confirmed |
+
+Ethereum token discovery is now genuinely, trustworthily verified — not just "probably fine because
+the original scan happened to catch the real answer despite a broken chunking method." Both ranges
+covered with zero failed chunks, using a cap independently confirmed to actually hold (unlike
+`drpc.org`'s misleadingly-advertised limit).
 
 | Item | Status | Notes |
 |---|---|---|
@@ -188,7 +201,13 @@ begins.
 |---|---|---|
 | Free RPC | ✅ (needs signup) | No working *keyless* archive option found — tried `drpc.org` (rate-limited), `publicnode` (archive gated), official `bsc-dataseed` (`"missing trie node"` — genuinely doesn't retain old state), `1rpc.io`, `ankr` (needs key), `meowrpc`, `llamarpc`, `blockpi` (down/unreachable). **NodeReal free tier confirmed working** for both archive `eth_getBalance` and `eth_call`, plus `eth_getLogs` (50,000-block cap, more generous than Ethereum's drpc). Free-tier signup, no payment — consistent with the project's "free only" constraint. |
 | Native genesis | Not directly tested | (Wallet's BSC activity investigated was token-focused; native genesis on BSC not yet pinned down.) |
-| Token discovery | ✅ (with a caveat) | Full coverage-checked scan (genesis block 10,027,281 → latest) for NAFTY found exactly one Transfer event, a swap-router transaction, tx-confirmed with block/timestamp/amount all cross-checked. |
+**Re-verification (NodeReal, real error detection):** 2,010 chunks across the full genesis-to-latest
+range, **zero failed chunks**, found only the same NAFTY genesis transfer as the original discovery
+— nothing else. This also puts the NAFTY rebasing-token finding (balance grew ~3.84% with no
+matching Transfer event) on fully solid footing, since we now know with certainty no Transfer event
+was silently missed.
+
+
 | Token balance correctness | ⚠️ **Key finding** | NAFTY's current `balanceOf` (29,451.567...) does **not** match the sum of its Transfer history (28,363.005... from the single discovered transfer) — a ~3.84% unexplained increase with zero corresponding Transfer events. This is the finding behind point 2 above; treat as a rebasing/reflection-style token. Confirmed this is NAFTY-specific by cross-checking TR3 on Ethereum, which matches its Transfer history exactly. |
 | Aave | ⚠️ Real gap found | Aave V3 **is** deployed on BSC (Pool: `0x6807dc923806fE8Fd134338EABCA509979a7e0cB`), confirmed via a real position on the test wallet ($110.64 collateral / $45.21 debt / 1.835 health factor, decoded and sane) — **but this project's existing `AaveHoldingsClient` has no BSC entry in its `POOLS` config at all.** This means `/holdings-now` is likely already under-reporting this wallet's BSC Aave position today, independent of anything to do with historical reconstruction. Worth fixing regardless of this feature's timeline. |
 | Compound | ✅ N/A | Compound III is not deployed on BSC (confirmed) — no work needed here. |
