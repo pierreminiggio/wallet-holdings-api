@@ -20,10 +20,35 @@ Compound, and Aave positions on more than one chain).
 
 ## ⚠️ CRITICAL — methodology bug found, invalidates prior "full coverage, zero results" claims
 
-**Discovered after real, independently-verified Aave transactions (via known tx hashes) turned out
-to be completely missed by a scan that had reported "full coverage, zero results" for that exact
-block range and event type.** This is a serious finding and must be fully resolved before trusting
-*any* zero-result conclusion elsewhere in this document.
+**UPDATE — root cause fully diagnosed and confirmed, not a quota:** through a structured bisection
+(isolating range size as the only variable, re-testing previously-successful calls afterward to rule
+out time-based degradation), the real, stable, reproducible cap on `drpc.org`'s free tier for
+`eth_getLogs` is **101 blocks per call** — both for topics-only queries and address+topics queries,
+tested independently and converging on the identical number. Size 101 succeeds, size 102 fails,
+consistently, every time. **The error message text (`"ranges over 10000 blocks are not supported"`)
+is wrong/misleading by roughly two orders of magnitude** — the actual enforced cap has nothing to do
+with the number "10000" in that message. This is now certain, not a hypothesis: a previously-working
+small call was re-tested immediately after a failing large call and still worked, ruling out any
+account-wide quota, ban, or time-based throttling — it is a pure function of range size, and that
+size is ~101, not ~10000.
+
+**This finding, combined with the off-by-one bug below, means every chunked scan run this entire
+session (Ethereum, BSC, Polygon — using STEP values of 9999 or similar) was requesting ranges
+roughly 100x larger than this provider actually supports.** Given every scan's "success" detection
+only checked for the *absence* of an error rather than logging failures explicitly, it is likely that
+the overwhelming majority of chunks in every large scan this session **silently failed**, and the
+"full coverage, zero results confirmed" claims throughout this document were built on a small
+fraction of chunks that happened to succeed (or, in some cases, may have been entirely a sea of
+silent failures with the reported "coverage" being pure block-arithmetic bookkeeping unrelated to
+what was actually queried).
+
+**Practical implication: every prior scan in this document must be re-run with a real per-call range
+of ~100 blocks (safely: 100) and real error detection, before any of it can be trusted.** At ~100
+blocks per call, a scan across tens of millions of blocks requires tens of thousands of RPC calls —
+meaningfully slower and a real practical constraint worth knowing before committing to a from-genesis
+reconstruction design built on this provider.
+
+Original diagnosis (still relevant context, now superseded by the above as the primary cause):
 
 Two compounding problems, found together:
 
