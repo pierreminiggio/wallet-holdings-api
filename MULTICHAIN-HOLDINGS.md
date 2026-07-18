@@ -325,7 +325,7 @@ more informative than any amount of further blind scanning.
 | Native genesis | Not directly pinned down (wallet's BSC activity investigated was token-focused; native genesis not yet bisected — low priority, doesn't block anything currently understood). |
 | Token discovery | ✅✅ **Re-verified** with the correct method: 2,010 chunks across the full genesis-to-latest range, **zero failed chunks**. Found exactly one Transfer — NAFTY's genesis, tx-confirmed (block, timestamp, amount, and swap-router transaction hash all cross-checked). Nothing else. |
 | Token balance correctness | ⚠️ **Key finding, now on solid footing**: NAFTY's current `balanceOf` (29,451.567...) does not match its Transfer history (28,363.005... from the one discovered transfer) — a ~3.84% unexplained increase, zero matching Transfer events, confirmed with full trustworthy coverage. Treat as a rebasing/reflection-style token; this is the finding behind "never trust summed deltas" in section 4. |
-| Aave | ⚠️ **Real product gap found** — Aave V3 *is* deployed on BSC (Pool: `0x6807dc923806fE8Fd134338EABCA509979a7e0cB`), confirmed via a real, sane position on the test wallet, but this project's existing `AaveHoldingsClient` has **no BSC entry in its `POOLS` config at all** — meaning `/holdings-now` is likely under-reporting this wallet's BSC Aave position today, independent of the reconstruction feature. Worth fixing regardless of this feature's timeline. |
+| Aave | ✅ **Fixed** — Aave V3 *is* deployed on BSC (Pool: `0x6807dc923806fE8Fd134338EABCA509979a7e0cB`, DataProvider: `0xc90Df74A7c16245c5F5C5870327Ceb38Fe5d5328`, both from the canonical `aave-address-book` registry). This project's `AaveHoldingsClient::POOLS` previously had no BSC entry, meaning `/holdings-now` was under-reporting this wallet's BSC Aave position — **now added**, along with a `DEFAULT_RPC_URLS` entry for BSC (`https://bsc-rpc.publicnode.com`, confirmed working for `"latest"`-only reads, which is all `/holdings-now` needs). The full mechanism (`getAllReservesTokens` → per-reserve `getUserReserveData` → `getUserAccountData` summary) was tested end-to-end against the real wallet, producing a correct, schema-matching result cross-checked against Zerion's own raw token amounts in the cache (`aBnbWBNB`/`variableDebtBnbUSDC`), which agreed within the expected interest-accrual drift. |
 | Compound | ✅ N/A — Compound III is not deployed on BSC (confirmed via search of official docs). |
 
 ### Polygon — current-state tracking fully verified; historical reconstruction partially open
@@ -391,8 +391,7 @@ Deprioritized; reuse the same proven method later if ever needed, without dedica
    - Or: pursue a fundamentally faster method for this specific era (e.g., a provider with a genuinely
      larger real cap even in dense-log periods — not yet found; every free option tried so far
      degrades to ~101 blocks near Polygon's genesis).
-3. **Add a BSC entry to `AaveHoldingsClient`'s `POOLS` config** — a live product gap unrelated to the
-   reconstruction feature, found as a side effect of this testing, worth fixing on its own merits.
+3. ~~Add a BSC entry to `AaveHoldingsClient`'s `POOLS` config~~ — **done**, see the BSC section above.
 4. **Full test sequence for Base** — RPC survey, native genesis, token discovery, token correctness,
    Compound/Aave historical — mirroring what's done for the other three chains.
 5. **Re-verify Ethereum's Aave/Compound historical trend checks** with the corrected methodology —

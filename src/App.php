@@ -250,7 +250,14 @@ class App
         'base' => 'https://base-rpc.publicnode.com',
         'polygon' => 'https://polygon-bor-rpc.publicnode.com',
         'arbitrum' => 'https://arbitrum-one-rpc.publicnode.com',
-        'optimism' => 'https://optimism-rpc.publicnode.com'
+        'optimism' => 'https://optimism-rpc.publicnode.com',
+        // publicnode's BSC endpoint refuses deep-historical/archive reads without a
+        // personal token, but /holdings-now only ever reads "latest" -- confirmed
+        // working for both eth_getBalance and Aave's getUserAccountData at "latest"
+        // before adding this. If a historical-reconstruction feature for BSC is ever
+        // built, that will need a different (archive-capable, e.g. free-signup NodeReal)
+        // RPC -- see MULTICHAIN-HOLDINGS.md.
+        'binance-smart-chain' => 'https://bsc-rpc.publicnode.com'
     ];
 
     /**

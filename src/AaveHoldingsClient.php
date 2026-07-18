@@ -53,6 +53,10 @@ class AaveHoldingsClient
             'pool' => '0x794a61358D6845594F94dc1DB02A252b5b4814aD',
             'dataProvider' => '0x243Aa95cAC2a25651eda86e80bEe66114413c43b',
         ],
+        'binance-smart-chain' => [
+            'pool' => '0x6807dc923806fE8Fd134338EABCA509979a7e0cB',
+            'dataProvider' => '0xc90Df74A7c16245c5F5C5870327Ceb38Fe5d5328',
+        ],
     ];
 
     /**
