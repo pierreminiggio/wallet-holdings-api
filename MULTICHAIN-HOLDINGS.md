@@ -258,6 +258,32 @@ curl ... --data "{...,\"data\":\"0x2b92a07d$WALLET_ENC$ASSET_ENC\"...}"
 initially misattributed as an Aave transaction from a casual glance — always confirm the `to` address
 of a transaction against known contract addresses before assuming which protocol it belongs to.
 
+### 5b. Multi-market Compound support — what's tested, what isn't
+
+Compound III has multiple isolated markets per chain (one per base asset), not one. The response
+schema was changed from a single `compound` object per chain to a list — `defi.compound` is now an
+array, one entry per market the wallet has a non-zero position in, matching how `defi.aave.reserves`
+already only lists non-zero reserves. The discovery mechanism itself (`numAssets()` +
+`getAssetInfo()` loop, section 5 above) needed **zero changes** to support this — it was already
+fully generic per-market; only the config (`CompoundHoldingsClient::MARKETS`, now a list of markets
+per chain instead of one) and the response assembly (list instead of single object) changed.
+
+**Markets added, and their verification status:**
+
+| Chain | Market (base asset) | Comet address | Verification |
+|---|---|---|---|
+| Base | USDC (pre-existing) | `0xb125E6687d4313864e53df431d5425969c15Eb2F` | Live in production before this change; not independently re-verified as part of this work. |
+| Base | USDS | `0x2c776041CCFe903071AF44aa147368a9c8EEA518` | ✅ **Fully tested** against a real wallet position: 402.608089649583865983 sUSDS collateral, 40.566139307172975914 USDS borrowed — matches the account owner's own description exactly. |
+| Base | USDbC | `0x9c4ec768c28520B50860ea7a15bd7213a9fF58bf` | ⚠️ **Not tested against a real position.** Address confirmed correct via Compound's own official governance-proposal market list (not a guess), and the discovery mechanism has been proven correct twice already on structurally different real markets (2 vs. 5 collateral assets, different decimals) — but this specific market's numbers have never been independently produced and checked against ground truth. A search for a real BaseScan holder of this market's position to test against did not turn up a usable address (explorer holder lists aren't accessible via the tools available here, consistent with this project's general avoidance of depending on explorer APIs). **If a real position in this market is ever available to test against, do that before fully trusting this row.** |
+| Polygon | USDC (pre-existing) | `0xF25212E676D1F7F89Cd72fFEe66158f541246445` | Live in production before this change; not independently re-verified as part of this work. |
+| Polygon | USDT0 | `0xaeB318360f27748Acb200CE616E389A6C9409a07` | ✅ **Fully tested** against a real wallet position: 0.2 WETH + 0.00725985 WBTC collateral, 344.508106 USDT0 borrowed — matches the account owner's own description ("various cryptos... borrow USDT0") exactly. |
+
+**A real, confirmed-legitimate address coincidence worth knowing about**: `0x9c4ec768c28520B50860ea7a15bd7213a9fF58bf` (Base's USDbC market) is the *same address* as Arbitrum's native USDC market, already in this project's pre-existing config. Verified via two independent sources (real Arbiscan transaction logs showing genuine Supply/Withdraw activity, and Compound's own governance-proposal JSON listing the exact per-chain mapping) that these are two real, unrelated, legitimate deployments that happen to share an address across chains — not a bug, not a copy-paste error, but a genuine trap for assuming "same address = same market" when cross-referencing chains.
+
+**Not investigated as part of this work, noticed only in passing**: Compound's official market list (surfaced while researching the above) shows Arbitrum also has an untracked WETH market (`0x6f7D514bbD4aFf3BcD1140B7344b32f063dEe486`) and Ethereum/Optimism weren't re-checked for additional markets beyond their existing single USDC entries. Worth a pass later, out of scope for this round since it wasn't asked for.
+
+
+
 ### 6. Aave positions (current or historical) — and its own pitfalls
 
 - **Live/current reads**: `getUserAccountData(wallet)` on the chain's Aave V3 Pool address, selector
@@ -335,15 +361,18 @@ more informative than any amount of further blind scanning.
 | Asset | Amount |
 |---|---|
 | Native POL | 75.215159839453963114 |
-| Compound (WBTC collateral, USDC Comet market) | 0.00048543 WBTC |
-| Compound (USDC base) | 0 supplied, 0 borrowed |
+| Compound — USDC market: WBTC collateral | 0.00048543 WBTC |
+| Compound — USDC market: USDC base | 0 supplied, 0 borrowed |
+| Compound — USDT0 market: collateral | 0.2 WETH, 0.00725985 WBTC |
+| Compound — USDT0 market: USDT0 base | 0 supplied, 344.508106 borrowed |
 | Aave collateral | $225.61 |
 | Aave debt | $112.67 |
 | Aave health factor | 1.56 |
 
-All six values above are direct point reads (`eth_getBalance`/`eth_call` at `"latest"`), each
+All values above are direct point reads (`eth_getBalance`/`eth_call` at `"latest"`), each
 independently verified — no log scanning involved, none of the caveats below apply to current-state
-tracking.
+tracking. The two Compound markets are genuinely separate, isolated positions (see section 5b) —
+Polygon's `defi.compound` is now a 2-entry array in the actual API response, not a single object.
 
 **Historical reconstruction — status:**
 
@@ -357,12 +386,15 @@ tracking.
 | Token/event discovery, native genesis (80,406,107) → current | 🔴 **Not yet re-run with a provider that holds up at scale in this range** — this range is NOT part of the dense low-fee era (it's Dec 2025–present), so it should behave like Ethereum/BSC's successful re-verifications once pointed at a reliable provider/chunk-size combination for this specific range. This is a cheap, high-value re-run to do next (see below). |
 | Compound on Polygon | ✅ Closed — see current-holdings table; the "WBTC supply" transaction that originally seemed to be Aave was actually Compound (see section 5's lesson). |
 
-### Base — not started
+### Base — Compound multi-market tested; everything else not started
 
-Existing `CompoundHoldingsClient`/`AaveHoldingsClient` config already has Base addresses (used by
-`/holdings-now` today), so live reads are presumably already correct, but this hasn't been
-independently verified the way Ethereum/BSC/Polygon's live reads were. No RPC survey, no genesis
-discovery, no historical correctness testing has been done for Base at all.
+**Compound**: see section 5b above — USDS market fully verified against a real position, USDbC
+market added from the official registry but not independently verified (no test wallet found).
+
+**Everything else on Base remains untested**: no RPC survey, no native/token genesis discovery, no
+historical correctness testing, and Aave on Base hasn't been re-verified as part of this project's
+testing effort (it's been live in production, but that's not the same as the direct, independent
+verification given to Ethereum/BSC/Polygon).
 
 ### Avalanche — explicitly out of scope
 

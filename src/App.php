@@ -1075,8 +1075,17 @@ class App
                                                 'compound' => [
                                                     'type' => 'array',
                                                     'description' => 'Empty if this wallet has no Compound '
-                                                        . 'position on this chain. Currently tracks each '
-                                                        . 'chain\'s USDC market only.',
+                                                        . 'position on this chain. A chain can have multiple '
+                                                        . 'entries if the wallet holds positions in more than '
+                                                        . 'one of that chain\'s Compound III markets at once '
+                                                        . '(e.g. both the USDC and USDS markets on Base) -- '
+                                                        . 'each market is a fully separate isolated position, '
+                                                        . 'distinguished by "base"/"market" below. See '
+                                                        . 'CompoundHoldingsClient::MARKETS for the full list of '
+                                                        . 'markets tracked per chain, and MULTICHAIN-HOLDINGS.md '
+                                                        . 'for which of those have been directly verified against '
+                                                        . 'a real position vs. added from Compound\'s official '
+                                                        . 'registry but not yet independently cross-checked.',
                                                     'items' => [
                                                         'type' => 'object',
                                                         'properties' => [
@@ -1181,7 +1190,10 @@ class App
                                 'properties' => [
                                     'compound' => [
                                         'type' => 'object',
-                                        'description' => 'Chain => error code (e.g. "upstream_error").'
+                                        'description' => '"{chain}/{base}" => error code (e.g. '
+                                            . '"base/USDS" => "upstream_error"), one entry per market whose '
+                                            . 'read failed -- not just "{chain}", since a chain can have '
+                                            . 'multiple Compound markets and only one of them might fail.'
                                     ],
                                     'aave' => [
                                         'type' => 'object',

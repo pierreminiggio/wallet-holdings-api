@@ -4,17 +4,27 @@ namespace App;
 
 /**
  * Reads a wallet's Compound III (Comet) positions directly from the on-chain contracts
- * via eth_call, across every chain in self::MARKETS. No third-party API/key needed.
+ * via eth_call, across every market in self::MARKETS. No third-party API/key needed.
  *
  * Compound III has one isolated market contract per (chain, base asset) pair -- e.g.
- * "the USDC market on Base" -- rather than one shared pool like Aave. A wallet's
- * position is scoped per market: it can supply the base asset (earning interest) OR
- * borrow it against collateral, plus post multiple collateral assets.
+ * "the USDC market on Base" -- rather than one shared pool like Aave. A chain can (and
+ * often does) have several such markets simultaneously; a wallet's position is scoped
+ * per market, and a wallet can hold positions in more than one market on the same
+ * chain at once. Each market's position: the wallet can supply the base asset (earning
+ * interest) OR borrow it against collateral, plus post multiple collateral assets.
  *
- * Currently only tracks each chain's USDC market (the dominant one on every chain
- * listed here). Add rows to self::MARKETS the same way to track other base-asset
- * markets (WETH, USDT, ...): pull the "comet" proxy address from
+ * self::MARKETS is keyed by chain, each holding a *list* of markets for that chain (not
+ * a single market -- see MULTICHAIN-HOLDINGS.md for why this matters and which markets
+ * have been directly tested vs. added from Compound's official registry but not yet
+ * verified against a real position). Pull additional "comet" proxy addresses from
  * https://github.com/compound-finance/comet/tree/main/deployments/<chain>/<asset>/roots.json
+ * or the official markets list referenced in Compound's own governance proposals.
+ *
+ * CAUTION: Comet addresses are not guaranteed unique *across* chains (factory/CREATE2
+ * deployments can and do land on the same address on two different chains for two
+ * completely unrelated markets -- confirmed true for at least one address in this
+ * file). Always resolve an address in the context of the specific chain it's under;
+ * never assume seeing the same address elsewhere means the same market.
  */
 class CompoundHoldingsClient
 {
@@ -30,13 +40,38 @@ class CompoundHoldingsClient
 
     // Comet proxy addresses, keyed the same way as Zerion's chain IDs (see
     // ZerionPosition::$chainId) so results merge cleanly under the same chain keys.
-    // Pulled from https://github.com/compound-finance/comet/tree/main/deployments
+    // Pulled from https://github.com/compound-finance/comet/tree/main/deployments and
+    // cross-checked against Compound's official markets list embedded in its own
+    // governance proposals where noted below.
     private const MARKETS = [
-        'ethereum' => ['base' => 'USDC', 'comet' => '0xc3d688B66703497DAA19211EEdff47f25384cdc3'],
-        'base' => ['base' => 'USDC', 'comet' => '0xb125E6687d4313864e53df431d5425969c15Eb2F'],
-        'polygon' => ['base' => 'USDC', 'comet' => '0xF25212E676D1F7F89Cd72fFEe66158f541246445'],
-        'arbitrum' => ['base' => 'USDC', 'comet' => '0x9c4ec768c28520B50860ea7a15bd7213a9fF58bf'],
-        'optimism' => ['base' => 'USDC', 'comet' => '0x2e44e174f7D53F0212823acC11C01A11d58c5bCB'],
+        'ethereum' => [
+            ['base' => 'USDC', 'comet' => '0xc3d688B66703497DAA19211EEdff47f25384cdc3'],
+        ],
+        'base' => [
+            ['base' => 'USDC', 'comet' => '0xb125E6687d4313864e53df431d5425969c15Eb2F'],
+            // Tested directly against a real wallet position (sUSDS/cbBTC collateral,
+            // USDS borrow) -- see MULTICHAIN-HOLDINGS.md.
+            ['base' => 'USDS', 'comet' => '0x2c776041CCFe903071AF44aa147368a9c8EEA518'],
+            // NOT tested against a real wallet position -- added from Compound's
+            // official registry only. The discovery mechanism (getMarketPosition
+            // below) is generic and has been proven correct against two other real,
+            // different-shaped markets already, but this specific market's numbers
+            // have not been independently cross-checked the way the others have. See
+            // MULTICHAIN-HOLDINGS.md before treating this one as fully verified.
+            ['base' => 'USDbC', 'comet' => '0x9c4ec768c28520B50860ea7a15bd7213a9fF58bf'],
+        ],
+        'polygon' => [
+            ['base' => 'USDC', 'comet' => '0xF25212E676D1F7F89Cd72fFEe66158f541246445'],
+            // Tested directly against a real wallet position (WETH/WBTC collateral,
+            // USDT0 borrow) -- see MULTICHAIN-HOLDINGS.md.
+            ['base' => 'USDT0', 'comet' => '0xaeB318360f27748Acb200CE616E389A6C9409a07'],
+        ],
+        'arbitrum' => [
+            ['base' => 'USDC', 'comet' => '0x9c4ec768c28520B50860ea7a15bd7213a9fF58bf'],
+        ],
+        'optimism' => [
+            ['base' => 'USDC', 'comet' => '0x2e44e174f7D53F0212823acC11C01A11d58c5bCB'],
+        ],
     ];
 
     /**
@@ -48,45 +83,54 @@ class CompoundHoldingsClient
     }
 
     /**
-     * @return array{positions: array<string, array>, errors: array<string, string>}
-     *         "positions" covers only chains where this wallet has a non-zero position
-     *         and the RPC call succeeded. Chains that errored are reported separately
-     *         under "errors" so a single bad RPC doesn't silently drop data.
+     * @return array{positions: array<string, list<array>>, errors: array<string, string>}
+     *         "positions" maps chain => list of this wallet's non-zero positions on
+     *         that chain (one entry per market with an actual position; a chain with
+     *         several active markets gets several entries, a chain with none is
+     *         omitted entirely rather than present with an empty list).
+     *         "errors" is keyed "{chain}/{base}" (not just "{chain}") since a single
+     *         chain can now have multiple markets and one market's RPC failure
+     *         shouldn't be indistinguishable from another's, or silently block markets
+     *         on the same chain that succeeded.
      */
     public function getHoldings(string $address): array
     {
         $positions = [];
         $errors = [];
 
-        foreach (self::MARKETS as $chain => $market) {
+        foreach (self::MARKETS as $chain => $markets) {
             if (! isset($this->rpcUrls[$chain])) {
                 continue;
             }
 
             $rpc = new EvmRpcClient($this->rpcUrls[$chain]);
-            $result = $this->getMarketPosition($rpc, $address, $market['comet']);
 
-            if (is_string($result)) {
-                $errors[$chain] = $result;
+            foreach ($markets as $market) {
+                $result = $this->getMarketPosition($rpc, $address, $market['comet']);
 
-                continue;
+                if (is_string($result)) {
+                    $errors["{$chain}/{$market['base']}"] = $result;
+
+                    continue;
+                }
+
+                $hasPosition = ! AbiCodec::isZero($result['supplied'])
+                    || ! AbiCodec::isZero($result['borrowed'])
+                    || ! empty($result['collateral']);
+
+                if (! $hasPosition) {
+                    continue;
+                }
+
+                $positions[$chain] ??= [];
+                $positions[$chain][] = [
+                    'base' => $market['base'],
+                    'market' => $market['comet'],
+                    'supplied' => $result['suppliedFormatted'],
+                    'borrowed' => $result['borrowedFormatted'],
+                    'collateral' => $result['collateral'],
+                ];
             }
-
-            $hasPosition = ! AbiCodec::isZero($result['supplied'])
-                || ! AbiCodec::isZero($result['borrowed'])
-                || ! empty($result['collateral']);
-
-            if (! $hasPosition) {
-                continue;
-            }
-
-            $positions[$chain] = [
-                'base' => $market['base'],
-                'market' => $market['comet'],
-                'supplied' => $result['suppliedFormatted'],
-                'borrowed' => $result['borrowedFormatted'],
-                'collateral' => $result['collateral'],
-            ];
         }
 
         return ['positions' => $positions, 'errors' => $errors];
