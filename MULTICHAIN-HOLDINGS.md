@@ -386,15 +386,36 @@ Polygon's `defi.compound` is now a 2-entry array in the actual API response, not
 | Token/event discovery, native genesis (80,406,107) → current | 🔴 **Not yet re-run with a provider that holds up at scale in this range** — this range is NOT part of the dense low-fee era (it's Dec 2025–present), so it should behave like Ethereum/BSC's successful re-verifications once pointed at a reliable provider/chunk-size combination for this specific range. This is a cheap, high-value re-run to do next (see below). |
 | Compound on Polygon | ✅ Closed — see current-holdings table; the "WBTC supply" transaction that originally seemed to be Aave was actually Compound (see section 5's lesson). |
 
-### Base — Compound multi-market tested; everything else not started
+### Base — Compound multi-market tested; native genesis found; rest in progress
 
-**Compound**: see section 5b above — USDS market fully verified against a real position, USDbC
-market added from the official registry but not independently verified (no test wallet found).
+**RPC**: `drpc.org`, keyless. Archive confirmed working (verified against this wallet's own real
+balance change between an old block and `latest`, not just a zero result). **`eth_getLogs` real cap
+bisected at ~10,000 blocks** — genuinely close to the advertised limit here, unlike Ethereum/Polygon's
+`drpc` endpoints where the same advertised "10,000" turned out to really be ~101. Caps are evidently
+per-chain (and, per the Polygon finding, per-era) even on the same provider — never assume a cap
+carries over from one chain to another, always re-bisect. `publicnode` is keyless but gates archive
+reads behind a personal token (same pattern as Ethereum/BSC); not used since `drpc` already works.
+NodeReal's Base hostname guess didn't resolve — not pursued since `drpc` was sufficient.
 
-**Everything else on Base remains untested**: no RPC survey, no native/token genesis discovery, no
-historical correctness testing, and Aave on Base hasn't been re-verified as part of this project's
-testing effort (it's been live in production, but that's not the same as the direct, independent
-verification given to Ethereum/BSC/Polygon).
+**Native ETH genesis**: block 35,321,858 (Sept 9, 2025, 15:51:03 UTC), tx-confirmed — single clean
+incoming deposit of 0.00359307 ETH, exact match to the balance at that block. Notable: the wallet's
+balance fluctuated through several different nonzero values *during* the bisection search itself
+(narrowing window kept finding different real amounts, not just 0-vs-nonzero) — meaning the wallet
+was in a burst of activity right around its own genesis, same "bridge funds in, immediately start
+using them" pattern seen on Polygon and Ethereum. This doesn't break the bisection (it still
+correctly converges on the first zero→nonzero transition regardless of what specific nonzero values
+appear along the way), but is worth knowing if the raw bisection trace looks confusing on a future
+read-through.
+
+**Nonce at time of testing**: 1,084 — a genuinely active wallet on Base, more so than any other
+chain tested so far.
+
+**Compound**: see section 5b — USDS market fully verified against a real position (this predates
+today's Base-focused work). USDbC market added but not independently verified.
+
+**Not yet done**: token discovery (genesis, pre-genesis check, full-history scan), Aave historical
+reads including a check for whether Base's Aave DataProvider has a redeployment history like
+Ethereum's did, and historical reads for the two newer Compound markets (USDS, USDbC).
 
 ### Avalanche — explicitly out of scope
 
