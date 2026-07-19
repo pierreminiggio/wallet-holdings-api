@@ -30,7 +30,10 @@ already hit and fixed, and concrete regression-test checklists with real validat
   are **directly-verified on-chain** Compound III / Aave V3 positions for that chain — read straight
   from each protocol's own contracts via `eth_call`, no third-party API involved for that part —
   while `other` is whatever misc protocol positions (staking, LP, etc.) Zerion itself reported for
-  that chain. This split exists because Zerion's own data typically doesn't surface Aave/Compound at
+  that chain. `compound` is a list, not a single object: Compound III has multiple isolated markets
+  per chain (one per base asset, e.g. Base has separate USDC/USDS/USDbC markets), and a wallet can
+  hold a position in more than one at once — each gets its own entry.
+  This split exists because Zerion's own data typically doesn't surface Aave/Compound at
   all (they show up as plain aToken balances instead), so `compound`/`aave` fill that gap with
   verified data alongside whatever Zerion does report under `other`. The entire response (Zerion
   holdings + the on-chain enrichment) is cached per address for **2 hours**: a request within that
@@ -98,7 +101,10 @@ GET /holdings/0x1234567890123456789012345678901234567890?date=2026-06-15
       "native": { "symbol": "ETH", "amount": "0.02" },
       "tokens": [],
       "defi": {
-        "compound": { "base": "USDC", "market": "0xb125...", "supplied": "0", "borrowed": "7499.36", "collateral": [] },
+        "compound": [
+          { "base": "USDC", "market": "0xb125...", "supplied": "0", "borrowed": "7499.36", "collateral": [] },
+          { "base": "USDS", "market": "0x2c77...", "supplied": "0", "borrowed": "40.57", "collateral": [{ "symbol": "sUSDS", "amount": "402.61" }] }
+        ],
         "aave": null,
         "other": []
       }

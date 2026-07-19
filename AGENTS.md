@@ -416,11 +416,17 @@ identified. See Part 3 below for `/holdings`'s current behavior in full.
 
 ## Known limitations — real, not hypothetical, but out of scope so far
 
-- **Compound tracks each chain's USDC market only.** A wallet with a Compound position in a
-  WETH-base or USDT-base market (Compound III has one market per base asset, not one pool) will
-  not show it. To add one, pull the Comet proxy address from
-  `deployments/<chain>/<asset>/roots.json` in `compound-finance/comet`'s GitHub repo and add a
-  row to `CompoundHoldingsClient::MARKETS`.
+- **Compound tracks multiple markets per chain now, but not every market that exists.**
+  `CompoundHoldingsClient::MARKETS` holds a *list* per chain (not one market), and `defi.compound`
+  in the response is correspondingly an array. Base and Polygon each track two markets as of this
+  writing (see `MARKETS` for the current list, and `MULTICHAIN-HOLDINGS.md` section 5b for which of
+  those were independently verified against a real position vs. added from Compound's official
+  registry only); Ethereum/Arbitrum/Optimism still only track their USDC market. To add another,
+  pull the Comet proxy address from `deployments/<chain>/<asset>/roots.json` in
+  `compound-finance/comet`'s GitHub repo (or Compound's own governance-proposal market list, which
+  tends to be more current) and add a row to that chain's list in `CompoundHoldingsClient::MARKETS`
+  — the discovery logic itself (`getMarketPosition`) needs no changes, it's already fully generic
+  per-market.
 - **No USD pricing on the Compound side.** Aave's `summary` includes USD totals (from Aave's own
   oracle, via `getUserAccountData`); Compound only returns raw token amounts. Not yet
   implemented — would need a price source (Chainlink feeds via Comet's `getAssetInfo().priceFeed`,
