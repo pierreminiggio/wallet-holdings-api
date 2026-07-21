@@ -301,12 +301,18 @@ per chain instead of one) and the response assembly (list instead of single obje
   8-decimal USD), `currentLiquidationThreshold`/`ltv` (bps), `healthFactor` (18-decimal, or all-`f`s
   = infinite/no debt).
 - **Historical convenience reads** (`getUserReserveData` on the `AaveProtocolDataProvider`, selector
-  `0x28dd2d01`) are **not safe for arbitrary historical dates** — Ethereum's DataProvider contract was
-  **fully redeployed** at block 22,686,778 (June 5, 2025 — confirmed via `eth_getCode` returning `0x`
-  before that block, real bytecode after). Any pre-redeployment historical read via this convenience
-  method will silently fail (empty `eth_call` result, not an error). **Use direct `balanceOf` on the
-  aToken/debt-token contracts instead** for historical Aave reads — proven to work uninterrupted
-  across the same period where the DataProvider method breaks.
+  `0x28dd2d01`) are **not safe for arbitrary historical dates, on any chain** — this was first found
+  on Ethereum (DataProvider redeployed at block 22,686,778, June 5 2025 — confirmed via `eth_getCode`
+  returning `0x` before that block, real bytecode after) but **directly confirmed to be a
+  coordinated, cross-chain event**, not Ethereum-specific: Polygon's and Base's DataProviders both
+  redeployed June 10, 2025, and BSC's redeployed June 11, 2025 — all four chains within a single
+  week. Any pre-redeployment historical read via this convenience method will silently fail (empty
+  `eth_call` result, not an error) **on every chain**, not just Ethereum. **Use direct `balanceOf` on
+  the aToken/debt-token contracts instead** for historical Aave reads — proven to work uninterrupted
+  across this boundary on every chain checked so far, and should be treated as the default method,
+  with the convenience method as an optimization only valid after each chain's specific
+  redeployment date (all currently known to fall in the June 5-11, 2025 window, but worth
+  re-verifying per-chain rather than assuming that exact week applies universally forever).
 - **Verify event signatures independently, never purely from memory** — even signatures that "should"
   be right have been wrong before in this exact codebase's testing (see the wrong `aEthWETH` address
   guess below). To compute/verify a signature:
