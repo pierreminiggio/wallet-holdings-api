@@ -218,6 +218,16 @@ covered per chunk in Polygon's 2020-2021 era, meaning a full historical scan of 
 was estimated at **~20 days** at the observed rate — genuinely impractical to run exhaustively via
 this manual/chat-driven process; see "What's left to test" below for how this was handled instead).
 
+**A second, distinct failure mode exists on top of the plain block-range cap**: some providers (seen
+on `drpc.org`) return a *different* error — a request timeout (e.g. `"Request timeout on the free
+tier..."`) — when a query's *result volume* is too large for the range requested, even if the range
+itself is under the nominal cap. This is a density problem, not a range-size problem, and it needs
+the same fix (shrink and retry) but must be triggered by a different error-message match than a
+rate-limit ("too many requests") error, which instead needs backoff-and-retry-same-size, not
+shrinking. A production implementation should handle both: match on the specific error text to
+decide "shrink the range" vs. "wait and retry the same range" rather than treating every error
+identically.
+
 ### 4. Verifying token-balance correctness — NEVER trust summed Transfer deltas
 
 Once tokens are discovered via logs, **do not** compute their historical balance by summing Transfer
@@ -410,12 +420,28 @@ read-through.
 **Nonce at time of testing**: 1,084 — a genuinely active wallet on Base, more so than any other
 chain tested so far.
 
-**Compound**: see section 5b — USDS market fully verified against a real position (this predates
-today's Base-focused work). USDbC market added but not independently verified.
+**Token discovery**: full-history scan (block 0 → current, ~48.8M blocks) completed, using the
+adaptive shrink-on-timeout + retry-on-rate-limit script (section 3, extended with a second failure
+mode — see the new note below section 3). **Found 419 unique token contracts** this wallet has ever
+been sent or has sent on Base — consistent with the many airdropped/spam tokens already visible in
+the live `/holdings-now` cache (`$HALLOWEEN`, `DEGEN`, `GOKU`, etc.). Zero unrecoverable errors.
 
-**Not yet done**: token discovery (genesis, pre-genesis check, full-history scan), Aave historical
-reads including a check for whether Base's Aave DataProvider has a redeployment history like
-Ethereum's did, and historical reads for the two newer Compound markets (USDS, USDbC).
+One honest gap versus earlier chains' scans: this run's output only logged chunks where something
+was *found* — empty-but-successful chunks left no trace, so there's no explicit final "blocks
+covered vs. expected" arithmetic to point to the way Ethereum/BSC's re-verified scans have. Coverage
+completeness here rests on the adaptive script's *design* (it only ever advances past a block range
+after that range's calls succeed, so a gap is structurally impossible by construction) rather than
+an explicit printed self-check. That's a real, defensible guarantee, but a weaker form of evidence
+than the explicit arithmetic checks used elsewhere in this document — worth knowing if this ever
+needs re-litigating.
+
+**New provider failure mode discovered on this chain's `drpc` endpoint, on top of the earlier
+rate-limit case**: `"Request timeout on the free tier, please upgrade..."` (distinct error code from
+the rate-limit message) — appears tied to log density in a given range, same underlying cause as
+Polygon's tiny-cap-in-dense-eras finding, just manifesting as a timeout instead of a hard range-size
+rejection here. The fix is the same: shrink the range and retry, don't just back off and retry the
+same size. Any future scan script should handle both failure modes (rate-limit → backoff-and-retry
+same size; timeout/density → shrink range and retry) rather than just one.
 
 ### Avalanche — explicitly out of scope
 
