@@ -456,7 +456,85 @@ Deprioritized; reuse the same proven method later if ever needed, without dedica
 
 ---
 
-## What's left to test (in priority order)
+## Target implementation architecture (for whoever builds this once testing is complete)
+
+This section captures the actual build plan, decided early in this project's design discussion,
+that the rest of this document's testing has been validating piece by piece. **Nothing below has
+been built yet** — this is the blueprint, written down so it survives independently of any one
+conversation's history.
+
+### High-level approach
+
+Mirror the existing SUI reconstruction's *shape*, not its exact mechanics — EVM chains don't need a
+separate Node-based GitHub Action the way SUI's NAVI SDK dependency required, since everything here
+is plain JSON-RPC (`eth_call`/`eth_getLogs`/`eth_getBalance`), which `EvmRpcClient` (PHP) already
+speaks. **Explicit decision: stay in-process PHP, no GitHub Action**, unless testing surfaces a real
+need for a non-PHP dependency (none has, so far).
+
+### New PHP components needed
+
+- **A log-scanning utility** (e.g. `EvmLogScanner`) implementing the adaptive chunking algorithm from
+  section 3 as a single, shared, reusable piece — not reimplemented ad hoc per chain or per call site.
+  Must support both failure modes found during testing: rate-limit errors (backoff, retry same range)
+  and density/timeout errors (shrink range, retry same start block). This is the single most
+  load-bearing piece of new code, since nearly every bug found during testing was a flaw in this
+  exact logic.
+- **A date→block resolver**, per chain, using the bisection approach from section 2. Cache the result
+  **per (chain, date)**, not per (wallet, date) — the answer is wallet-independent, so this is a huge,
+  free optimization once more than one wallet uses the feature (every wallet asking about the same
+  chain/date shares one resolved block instead of re-bisecting).
+- **Token discovery**, per (wallet, chain): run `EvmLogScanner` for `Transfer` events touching the
+  wallet, from the chain's genesis (or a resumed cursor position) to the target block. Output is a
+  *candidate list of token contract addresses* only — never a running balance ledger (see the next
+  point for why).
+- **Token balance reads**: for every discovered token, at the resolved historical block, a direct
+  `balanceOf(wallet)` call. **This is a hard requirement, not an optimization choice** — section 4
+  proved that summing Transfer deltas silently produces wrong answers for rebasing/reflection tokens
+  (real example: NAFTY on BSC). Never implement a delta-summing shortcut, even as a "fast path."
+- **Compound/Aave historical reads**: reuse the *existing* `CompoundHoldingsClient`/`AaveHoldingsClient`
+  logic almost as-is — both already do the right kind of point-in-time `eth_call`, they just need a
+  block-number parameter threaded through instead of a hardcoded `"latest"`. For Aave specifically,
+  default to the direct `balanceOf`-on-aToken/debt-token method (section 6), and only use the
+  `getUserReserveData` convenience method for dates after that chain's specific DataProvider
+  redeployment date (all four chains tested so far redeployed within June 5-11, 2025 — see section 6
+  and finding #10 in that section for the cross-chain confirmation).
+
+### Database schema
+
+- **Reuse `multichain_holdings_cache` as-is** for storing reconstructed snapshots (`source =
+  'reconstructed'`) — it's already `as_of_date`/`source`-shaped, append-only, and built for exactly
+  this; no schema change needed here.
+- **New cursor table**, e.g. `multichain_holdings_reconstruction_cursor`, keyed by `(address, chain)`
+  — one row per chain being scanned for a given wallet (not one row per wallet, since each chain's
+  scan progress is independent). Store at minimum: last-scanned block, and the running list of
+  discovered token contract addresses so far (so a resumed scan doesn't need to re-discover tokens
+  already found in an earlier, incomplete run). Given this codebase's query builder doesn't support
+  upsert or multi-`where()` (per the SUI section of `AGENTS.md`), follow the same append-only /
+  "pick latest in PHP" pattern already used for `sui_holdings_reconstruction_cursor`.
+- **Per-chain RPC config for reconstruction** needs to be distinct from `DEFAULT_RPC_URLS` (which is
+  keyless-`publicnode`-style and only needs `"latest"` reads for `/holdings-now`). Reconstruction
+  needs archive-capable, log-scanning-capable endpoints, which are chain-specific based on testing
+  so far: `drpc.org` for Ethereum and Base (both confirmed reliable there), NodeReal (free signup)
+  for Ethereum and BSC, Ankr (free signup) for Polygon. This mapping should live in its own config
+  array, not overload `DEFAULT_RPC_URLS`.
+
+### Endpoint
+
+Reactivate `/holdings` (currently a deliberate cache-only dead end, per the README/AGENTS.md history
+of the removed EVM reconstruction attempt) to trigger reconstruction on a cache miss, mirroring
+`/sui-holdings`'s existing 400 (before genesis) / 500 (cache inconsistency) / 502 (run failed) error
+shape, so the two multichain surfaces behave consistently to callers.
+
+**Open design question, not yet resolved**: unlike SUI's GitHub-Action-based async model, an
+in-process PHP reconstruction can't realistically block a single HTTP request for a scan that might
+take hours (see Polygon's ~20-day worst-case estimate for its dense 2020-2021 era). This needs some
+kind of background/queued execution model *within* PHP (e.g. a cron-triggered worker script polling
+a job table) rather than a synchronous request-response cycle — this hasn't been designed yet and is
+a real gap to close before implementation starts, not an afterthought.
+
+---
+
+
 
 1. **Polygon, native-genesis → current, log discovery** — re-run with the adaptive script (section 3)
    pointed at a provider confirmed reliable for *this* range specifically (Ankr held up fine near
