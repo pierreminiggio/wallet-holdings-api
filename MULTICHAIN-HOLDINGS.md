@@ -449,7 +449,24 @@ rejection here. The fix is the same: shrink the range and retry, don't just back
 same size. Any future scan script should handle both failure modes (rate-limit → backoff-and-retry
 same size; timeout/density → shrink range and retry) rather than just one.
 
-### Avalanche — explicitly out of scope
+**Aave DataProvider redeployment**: confirmed present on Base too, deployed June 10, 2025 — see
+section 6 above for the full cross-chain finding (all four chains tested redeployed within the same
+week).
+
+**Aave historical reads (`balanceOf`-on-aToken/debt-token method)**: ✅ Fully verified. Real aToken
+(`aEthWETH`, `0xd4a0e0b9149bcee3c920d2e00b5de09138fd8bb7`) and debt-token
+(`variableDebtBasUSDC`, `0x59dca05b6c26dbd64b5381374aaac5cd05644c28`) addresses independently
+cross-validated against the account owner's real live cache export (exact address match, not just a
+plausible guess). Historical trend sampled across 6 dates (Oct 2025 - Jul 2026) shows a coherent,
+real story — WETH collateral fully withdrawn then rebuilt, USDC debt cycling through a full
+borrow→repay→re-borrow pattern — converging naturally to the live cache's current values with no
+gaps or implausible jumps. Confirms the same method proven on Ethereum generalizes correctly to Base.
+
+**Not yet done on Base**: Compound USDS/USDbC markets' historical trend (config and current-state
+verified, but no historical dates sampled yet), and a repeat of the "does drpc's real cap match the
+advertised one" bisection specifically for the dense/early portion of Base's history (not yet found
+to be a problem here the way it was on Polygon, but also not explicitly ruled out with the same
+rigor).
 
 Confirmed with the account owner: no meaningful holdings on Avalanche for the test wallet.
 Deprioritized; reuse the same proven method later if ever needed, without dedicated testing.
