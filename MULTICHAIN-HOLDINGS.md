@@ -228,6 +228,13 @@ shrinking. A production implementation should handle both: match on the specific
 decide "shrink the range" vs. "wait and retry the same range" rather than treating every error
 identically.
 
+**A third variant of the rate-limit error message was found on Base**, beyond the two already
+documented above: `"You reached Public endpoint rate limit, please upgrade to paid plan"` — same
+underlying cause (backoff-and-retry-same-size, not shrink), just yet another different wording. Any
+production retry logic should match broadly (e.g. on the substring `"rate limit"` case-insensitively)
+rather than an exact phrase, since providers evidently don't use a single consistent message even for
+the same underlying condition.
+
 ### 4. Verifying token-balance correctness — NEVER trust summed Transfer deltas
 
 Once tokens are discovered via logs, **do not** compute their historical balance by summing Transfer
@@ -462,11 +469,29 @@ real story — WETH collateral fully withdrawn then rebuilt, USDC debt cycling t
 borrow→repay→re-borrow pattern — converging naturally to the live cache's current values with no
 gaps or implausible jumps. Confirms the same method proven on Ethereum generalizes correctly to Base.
 
-**Not yet done on Base**: Compound USDS/USDbC markets' historical trend (config and current-state
-verified, but no historical dates sampled yet), and a repeat of the "does drpc's real cap match the
-advertised one" bisection specifically for the dense/early portion of Base's history (not yet found
-to be a problem here the way it was on Polygon, but also not explicitly ruled out with the same
-rigor).
+**Not yet done on Base**: Compound USDbC market's historical trend (no real position on this wallet
+to test against, same caveat as its current-state verification — see section 5b), and a repeat of
+the "does drpc's real cap match the advertised one" bisection specifically for the dense/early
+portion of Base's history (not yet found to be a problem here the way it was on Polygon, but also
+not explicitly ruled out with the same rigor).
+
+**Compound USDS market historical reads**: ✅ Fully verified. Market deployment block found (Jan 20,
+2025, well before this wallet's Base presence began), confirming "not yet deployed" would correctly
+read as no-position rather than an error for any date before that. Historical trend across 5 dates
+(Oct 2025 - Jun 2026) shows a clean, textbook pattern: no position through Feb 2026, then the
+position opens with exactly 402.608089649583865983 sUSDS collateral — which **never changes** across
+every subsequent date sampled, including the live cache's current value — while the USDS borrow
+smoothly accrues interest with each successive read (40.20 → 40.52 → 40.57), matching a single
+deposit-then-hold pattern with no further deposits/withdrawals. This is about as clean a confirmation
+as this testing effort has produced anywhere.
+
+**Base testing is now substantially complete**: RPC, native genesis, token discovery (full history,
+419 tokens), Aave (config, DataProvider redeployment check, historical trend), and one of two new
+Compound markets (USDS) are all independently verified. The only real gaps left are the USDbC
+market's historical trend (blocked on finding a real test wallet, same as its current-state
+verification) and Base's overall token-balance correctness spot-check (TR3/NAFTY-style — hasn't been
+explicitly redone for any specific Base token yet, though the underlying mechanism is proven
+generically at this point across four chains).
 
 Confirmed with the account owner: no meaningful holdings on Avalanche for the test wallet.
 Deprioritized; reuse the same proven method later if ever needed, without dedicated testing.
