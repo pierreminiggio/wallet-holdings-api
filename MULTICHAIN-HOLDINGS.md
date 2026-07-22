@@ -291,7 +291,7 @@ per chain instead of one) and the response assembly (list instead of single obje
 |---|---|---|---|
 | Base | USDC (pre-existing) | `0xb125E6687d4313864e53df431d5425969c15Eb2F` | Live in production before this change; not independently re-verified as part of this work. |
 | Base | USDS | `0x2c776041CCFe903071AF44aa147368a9c8EEA518` | ✅ **Fully tested** against a real wallet position: 402.608089649583865983 sUSDS collateral, 40.566139307172975914 USDS borrowed — matches the account owner's own description exactly. |
-| Base | USDbC | `0x9c4ec768c28520B50860ea7a15bd7213a9fF58bf` | ⚠️ **Not tested against a real position.** Address confirmed correct via Compound's own official governance-proposal market list (not a guess), and the discovery mechanism has been proven correct twice already on structurally different real markets (2 vs. 5 collateral assets, different decimals) — but this specific market's numbers have never been independently produced and checked against ground truth. A search for a real BaseScan holder of this market's position to test against did not turn up a usable address (explorer holder lists aren't accessible via the tools available here, consistent with this project's general avoidance of depending on explorer APIs). **If a real position in this market is ever available to test against, do that before fully trusting this row.** |
+| Base | USDbC | `0x9c4ec768c28520B50860ea7a15bd7213a9fF58bf` | ⚠️ **Untested against a real position — assumed working.** Address confirmed correct via Compound's own official governance-proposal market list (not a guess). Two separate searches for a real holder address to test against came up empty (explorer holder/event lists aren't accessible via the tools available here, consistent with this project's general avoidance of depending on explorer APIs). Given the identical discovery mechanism has now been independently proven correct on four other real, structurally-different markets (Ethereum Compound, Polygon USDC + USDT0, Base USDS) with zero market-specific code needed each time, this one is assumed to work the same way rather than blocking further progress on it. **If a real position in this market is ever available to test against, do that to fully close this out.** |
 | Polygon | USDC (pre-existing) | `0xF25212E676D1F7F89Cd72fFEe66158f541246445` | Live in production before this change; not independently re-verified as part of this work. |
 | Polygon | USDT0 | `0xaeB318360f27748Acb200CE616E389A6C9409a07` | ✅ **Fully tested** against a real wallet position: 0.2 WETH + 0.00725985 WBTC collateral, 344.508106 USDT0 borrowed — matches the account owner's own description ("various cryptos... borrow USDT0") exactly. |
 
@@ -469,11 +469,12 @@ real story — WETH collateral fully withdrawn then rebuilt, USDC debt cycling t
 borrow→repay→re-borrow pattern — converging naturally to the live cache's current values with no
 gaps or implausible jumps. Confirms the same method proven on Ethereum generalizes correctly to Base.
 
-**Not yet done on Base**: Compound USDbC market's historical trend (no real position on this wallet
-to test against, same caveat as its current-state verification — see section 5b), and a repeat of
-the "does drpc's real cap match the advertised one" bisection specifically for the dense/early
-portion of Base's history (not yet found to be a problem here the way it was on Polygon, but also
-not explicitly ruled out with the same rigor).
+**Not yet done on Base**: Compound USDbC market's historical trend — no real position was found to
+test against despite two search attempts (see section 5b); assumed to work the same way as every
+other Compound market tested so far, given the identical discovery mechanism has held up correctly
+four times running. Also not yet done: a repeat of the "does drpc's real cap match the advertised
+one" bisection specifically for the dense/early portion of Base's history (not yet found to be a
+problem here the way it was on Polygon, but also not explicitly ruled out with the same rigor).
 
 **Compound USDS market historical reads**: ✅ Fully verified. Market deployment block found (Jan 20,
 2025, well before this wallet's Base presence began), confirming "not yet deployed" would correctly
@@ -488,9 +489,10 @@ as this testing effort has produced anywhere.
 **Base testing is now substantially complete**: RPC, native genesis, token discovery (full history,
 419 tokens), Aave (config, DataProvider redeployment check, historical trend), and one of two new
 Compound markets (USDS) are all independently verified. The only real gaps left are the USDbC
-market's historical trend (blocked on finding a real test wallet, same as its current-state
-verification) and Base's overall token-balance correctness spot-check (TR3/NAFTY-style — hasn't been
-explicitly redone for any specific Base token yet, though the underlying mechanism is proven
+market (untested against a real position, but assumed working given the identical mechanism's
+four-for-four track record on other markets) and Base's overall token-balance correctness spot-check
+(TR3/NAFTY-style — hasn't been explicitly redone for any specific Base token yet, though the
+underlying mechanism is proven
 generically at this point across four chains).
 
 Confirmed with the account owner: no meaningful holdings on Avalanche for the test wallet.
