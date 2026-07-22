@@ -586,27 +586,22 @@ a real gap to close before implementation starts, not an afterthought.
    so this should be fast and cheap, unlike the pre-genesis range. This is the single most
    valuable next test — it would close out real historical reconstruction for the period that
    actually matters for this wallet's real Polygon holdings.
-2. **Polygon, block 0 → native genesis, log discovery** — the ~20-day-at-current-rate problem. Options,
-   not yet decided:
-   - Accept a **documented, disclosed limitation**: treat pre-native-genesis Polygon history as
-     "not reconstructable in reasonable time on free infrastructure" and scope the feature
-     accordingly (this wallet's real holdings likely don't need it — its Polygon native genesis is
-     recent, and nothing found so far suggests years-earlier activity, unlike TR3 on Ethereum).
-   - Or: **coarse sampling** instead of exhaustive coverage (e.g., every 500,000 blocks, adaptive
-     window) — catches anything TR3/NAFTY-sized but explicitly is not full coverage, and must be
-     labeled as such if used, not silently treated as equivalent to a real scan.
-   - Or: pursue a fundamentally faster method for this specific era (e.g., a provider with a genuinely
-     larger real cap even in dense-log periods — not yet found; every free option tried so far
-     degrades to ~101 blocks near Polygon's genesis).
-3. ~~Add a BSC entry to `AaveHoldingsClient`'s `POOLS` config~~ — **done**, see the BSC section above.
-4. **Full test sequence for Base** — RPC survey, native genesis, token discovery, token correctness,
-   Compound/Aave historical — mirroring what's done for the other three chains.
-5. **Re-verify Ethereum's Aave/Compound historical trend checks** with the corrected methodology —
-   these were direct point-reads (not chunked scans), so they're likely unaffected by the chunking bug,
-   but haven't been explicitly re-confirmed post-discovery the way the log-scan-based findings were.
-6. Only after the above: design the actual PHP implementation (cursor/reconstruction-state
-   repository, endpoint wiring, caching, and **adaptive chunk sizing baked in as a first-class
-   requirement**, not an afterthought), reusing the SUI reconstruction's architecture as the template.
+2. **Polygon, block 0 → native genesis, log discovery** — the ~20-day-at-current-rate problem. Needs
+   a scoping decision (see the three options already laid out below) before it can be called done.
+3. **Base token-balance correctness spot-check** — the TR3/NAFTY-style check (does at least one
+   real Base token's `balanceOf` match or diverge from its Transfer history) hasn't been explicitly
+   redone for a specific Base token yet, even though the underlying mechanism is proven generically.
+4. **Re-verify Ethereum's Aave/Compound historical trend checks** with the corrected methodology —
+   these were direct point-reads (not chunked scans), so they're likely unaffected by the chunking
+   bug, but haven't been explicitly re-confirmed post-discovery the way the log-scan-based findings
+   were.
+5. **BSC native genesis** — never actually pinned down (low priority, doesn't block anything
+   currently understood, but a real gap in an otherwise-closed chain).
+6. **The async/background-execution design question** flagged in the architecture section above —
+   how a multi-hour scan runs without blocking an HTTP request. Needs an actual design, not just the
+   flag that it's unresolved.
+7. Only after the above: **build it** — the architecture section above is the blueprint; actual PHP
+   implementation (log scanner, cursor repository, endpoint wiring, DB schema) hasn't been started.
 
 No code for the multichain reconstruction feature should be written until this list is empty or its
 remaining items are explicitly, consciously scoped out — per this project's "remove every shadow
