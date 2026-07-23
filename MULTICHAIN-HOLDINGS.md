@@ -64,7 +64,59 @@ caution if that's not stated.**
 
 ---
 
-## Reproducible test methodology — how to (re-)run everything
+## ⚠️ SECOND CRITICAL FINDING — silent data loss from empty/failed responses being treated as success
+
+**Discovered via a real, independently-supplied transaction hash that proved a specific token
+position existed, in a specific block, inside a range that an adaptive scan had already reported as
+"fully covered, zero persistent errors."** This is the same class of problem as the first critical
+finding above (silent gaps in scans that report success), but a different, additional root cause —
+found *after* the off-by-one/error-detection fixes were already in place, meaning fixing the known
+bugs was not sufficient on its own.
+
+**The bug**: every retry-loop implementation used in this project's later testing (the adaptive
+`scan_range` pattern used for Base's and Polygon's full-history token scans) checked for success by
+verifying the response did **not** contain known rate-limit error text, then separately checked
+whether it contained the substring `"error"` before deciding whether to shrink/retry. This has a
+real gap: if the underlying `curl` call fails outright — a network blip, hitting the `--max-time`
+timeout, or any condition that produces an **empty string** instead of a JSON response — that empty
+string matches *neither* check. It doesn't contain rate-limit text (so the retry loop exits
+immediately, no retry attempted), and it doesn't contain `"error"` (so the failure-handling branch
+never triggers either). **The script silently treats a totally failed request as a successful,
+empty result**, and advances past that block range forever, with no error logged and no result
+recorded — a real chunk's real data, permanently lost, with zero trace anywhere in the output.
+
+**Confirmed in practice**: a real transaction hash showed a genuine `Transfer` event (an Aave
+variable-debt-token mint) at a specific Polygon block, well inside a range a prior scan had
+"completed" with zero errors. Re-querying that exact narrow window directly, immediately, returned
+the real data cleanly — proving the chain/RPC data was never the problem; the scan script silently
+dropped it.
+
+**Fix**: success/failure detection must positively confirm the response is well-formed (contains
+either `"result"` or `"error"` as a JSON key) rather than merely checking for the *absence* of
+specific known error substrings. Any response that is empty, malformed, or doesn't match either
+expected shape must be treated as a failure requiring retry — never silently advanced past.
+
+**Practical consequence**: any scan run using the "check for absence of known error text" pattern —
+notably Base's full-history token discovery (419 tokens found, 0 persistent errors reported) and
+Polygon's post-native-genesis token discovery (7 tokens found, 0 persistent errors reported) — must
+be considered **potentially incomplete**, not fully trustworthy, until re-run with the corrected
+detection logic. This does not necessarily mean those results are wrong (the chunks that succeeded
+did produce real, cross-validated results, e.g. Base's `aEthWETH`/`variableDebtBasUSDC` matching the
+live cache exactly), but any *absence* of a token from those scans' output can no longer be trusted
+as proof that token doesn't exist — exactly the situation that surfaced this bug in the first place.
+
+Corrected pattern for any future scan script:
+```bash
+# after receiving $result from curl:
+if [[ "$result" != *'"result"'* ]] && [[ "$result" != *'"error"'* ]]; then
+  # malformed/empty response -- treat as a failure, retry, never advance past it
+  ...
+fi
+```
+
+---
+
+
 
 This section is written so any of these tests can be re-run from scratch, on this wallet or a
 different one, by anyone (including a future Claude session) without re-deriving the approach.
