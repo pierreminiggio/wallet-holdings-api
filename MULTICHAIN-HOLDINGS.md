@@ -403,6 +403,17 @@ more informative than any amount of further blind scanning.
 
 ---
 
+**Real measured throughput for the post-native-genesis range, using the corrected (bug-fixed)
+scanner**: 50,000 blocks in 376 seconds (~133 blocks/second) on Ankr, giving an estimated
+**~21.5 hours** for the full ~10.3M-block post-genesis range. Confirms the tiny real cap found via
+direct bisection (100 blocks near current blocks) isn't a one-off — it's the genuine, sustained
+throughput ceiling for this range on this provider. Much better than the ~20-day pre-genesis
+estimate, but still substantial enough that it shouldn't be run interactively/blindly again without
+a real decision about the approach (background/overnight run vs. accepting a scoped limitation vs.
+finding a faster provider).
+
+---
+
 ## Chain-by-chain status
 
 ### Ethereum — closed, fully re-verified
