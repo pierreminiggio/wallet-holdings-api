@@ -116,7 +116,7 @@ fi
 
 ---
 
-
+## Reproducible test methodology — how to (re-)run everything
 
 This section is written so any of these tests can be re-run from scratch, on this wallet or a
 different one, by anyone (including a future Claude session) without re-deriving the approach.
@@ -127,8 +127,11 @@ different one, by anyone (including a future Claude session) without re-deriving
   BigInt-safe hex/decimal conversion — **do not** use plain bash arithmetic for values that might
   exceed ~9.2 × 10^18, e.g. token amounts in wei/18-decimals, since bash integers silently overflow).
 - Free RPC endpoints. As of this testing: `https://eth.drpc.org` (Ethereum, keyless), `https://polygon.drpc.org`
-  (Polygon, keyless — but see the cap caveats above), a NodeReal free-signup key (covers Ethereum and
-  BSC: `https://{eth,bsc}-mainnet.nodereal.io/v1/<key>`), and an Ankr free-signup key for Polygon
+  (Polygon, keyless — but see the cap caveats above), `https://base.drpc.org` (Base, keyless, real
+  cap much closer to its advertised ~10,000 than Ethereum/Polygon's `drpc` endpoints are), a
+  NodeReal free-signup key (covers Ethereum and BSC: `https://{eth,bsc}-mainnet.nodereal.io/v1/<key>`
+  — its Base and Polygon hostnames were guessed at and never resolved; not pursued further since
+  `drpc`/Ankr already covered those chains), and an Ankr free-signup key for Polygon
   (`https://rpc.ankr.com/polygon/<key>` or similar, from the Ankr dashboard).
 - No paid tier of anything was used or should be needed for this feature, per project constraint.
 
@@ -359,6 +362,16 @@ per chain instead of one) and the response assembly (list instead of single obje
   `0xbf92857c`. Returns 6 words: `totalCollateralUsd`, `totalDebtUsd`, `availableBorrowsUsd` (all
   8-decimal USD), `currentLiquidationThreshold`/`ltv` (bps), `healthFactor` (18-decimal, or all-`f`s
   = infinite/no debt).
+- **Finding the aToken/debt-token addresses needed for the direct-`balanceOf` method below**: call
+  `getReserveTokensAddresses(address asset)` on the chain's `AaveProtocolDataProvider`, selector
+  `0xd2493b6c`, passing the *underlying* asset's address (e.g. WETH's real address, not a token
+  symbol). Returns 3 words: `(aTokenAddress, stableDebtTokenAddress, variableDebtTokenAddress)`.
+  This call itself is only reliable from each chain's current DataProvider redeployment date onward
+  (see below) — but the returned aToken/debt-token *addresses* themselves are stable and can be
+  reused for historical reads arbitrarily far back, since it's the DataProvider *contract* that gets
+  redeployed, not the token contracts it points to. In practice: resolve these addresses once, using
+  today's DataProvider at `"latest"`, then reuse them for every historical `balanceOf` call
+  regardless of date.
 - **Historical convenience reads** (`getUserReserveData` on the `AaveProtocolDataProvider`, selector
   `0x28dd2d01`) are **not safe for arbitrary historical dates, on any chain** — this was first found
   on Ethereum (DataProvider redeployed at block 22,686,778, June 5 2025 — confirmed via `eth_getCode`
@@ -563,6 +576,74 @@ Deprioritized; reuse the same proven method later if ever needed, without dedica
 
 ---
 
+## Appendix: known contract addresses and RPC endpoints (quick reference)
+
+Everything below has been independently confirmed correct during this testing (via official
+registries, `eth_getCode` sanity checks, and/or real transaction cross-checks) — not guessed. Where
+a chain/market isn't listed, it hasn't been looked up as part of this work.
+
+### RPC endpoints used (all free tier)
+
+| Chain | Endpoint | Notes |
+|---|---|---|
+| Ethereum | `https://eth.drpc.org` | Keyless. Real `eth_getLogs` cap ~101 blocks (not the advertised 10,000) |
+| Ethereum | `https://eth-mainnet.nodereal.io/v1/<key>` | Free signup. Real cap ~49,999 blocks, reliable |
+| BSC | `https://bsc-mainnet.nodereal.io/v1/<key>` | Free signup. Real cap ~49,999 blocks, reliable. No working keyless option found for BSC archive access |
+| BSC | `https://bsc-rpc.publicnode.com` | Keyless, but `"latest"`-only reads (no archive) — fine for current-state tracking, not reconstruction |
+| Polygon | `https://polygon.drpc.org` | Keyless. Real cap ~101 blocks near dense eras (both 2020-2021 *and* near-current blocks) |
+| Polygon | Ankr (`https://rpc.ankr.com/polygon/<key>` or dashboard URL) | Free signup. Same tiny-cap-near-dense-blocks behavior as drpc — this is a chain-wide Polygon property, not a drpc-specific one |
+| Base | `https://base.drpc.org` | Keyless. Real cap much closer to advertised (~10,000) — the one chain where drpc's real cap roughly matches what it claims |
+
+### Aave V3 — Pool and DataProvider addresses, per chain
+
+| Chain | Pool | DataProvider | DataProvider redeployment date |
+|---|---|---|---|
+| Ethereum | `0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2` | `0x0a16f2FCC0D44FaE41cc54e079281D84A363bECD` | June 5, 2025 (block 22,686,778) |
+| Polygon | `0x794a61358D6845594F94dc1DB02A252b5b4814aD` | `0x243Aa95cAC2a25651eda86e80bEe66114413c43b` | June 10, 2025 (block 72,592,541) |
+| Base | `0xA238Dd80C259a72e81d7e4664a9801593F98d1c5` | `0x0F43731EB8d45A581f4a36DD74F5f358bc90C73A` | June 10, 2025 (block 31,377,575) |
+| BSC | `0x6807dc923806fE8Fd134338EABCA509979a7e0cB` | `0xc90Df74A7c16245c5F5C5870327Ceb38Fe5d5328` | June 11, 2025 (block 51,262,445) |
+
+All four addresses independently confirmed against Aave's official `aave-address-book` GitHub repo,
+not guessed. Any date before a chain's DataProvider redeployment date needs either the direct
+`balanceOf`-on-aToken/debt-token method (works across the whole history on every chain checked) or a
+prior DataProvider address (not looked up for any chain, since no wallet tested needed pre-June-2025
+Aave history).
+
+### Compound III (Comet) markets tested or added
+
+| Chain | Base asset | Comet address | Deployed |
+|---|---|---|---|
+| Ethereum | USDC | `0xc3d688B66703497DAA19211EEdff47f25384cdc3` | (pre-existing, not re-checked) |
+| Base | USDC | `0xb125E6687d4313864e53df431d5425969c15Eb2F` | (pre-existing, not re-checked) |
+| Base | USDS | `0x2c776041CCFe903071AF44aa147368a9c8EEA518` | Jan 20, 2025 |
+| Base | USDbC | `0x9c4ec768c28520B50860ea7a15bd7213a9fF58bf` | Aug 8, 2023 (same day as Base's Aave Pool) |
+| Polygon | USDC | `0xF25212E676D1F7F89Cd72fFEe66158f541246445` | (pre-existing, not re-checked) |
+| Polygon | USDT0 | `0xaeB318360f27748Acb200CE616E389A6C9409a07` | (not checked) |
+| Arbitrum | USDC | `0x9c4ec768c28520B50860ea7a15bd7213a9fF58bf` | (pre-existing — **same address as Base's USDbC market, confirmed real coincidence, not a bug**) |
+| Optimism | USDC | `0x2e44e174f7D53F0212823acC11C01A11d58c5bCB` | (pre-existing, not re-checked) |
+
+Noticed in passing, not yet added: Arbitrum also has an untracked WETH Comet market at
+`0x6f7D514bbD4aFf3BcD1140B7344b32f063dEe486`.
+
+### Function selectors used throughout this testing
+
+| Selector | Function | Used on |
+|---|---|---|
+| `0x70a08231` | `balanceOf(address)` | Any ERC-20, aToken, debt-token, or Comet market (base-asset supplied) |
+| `0x374c49b4` | `borrowBalanceOf(address)` | Comet markets (base-asset borrowed) |
+| `0x313ce567` | `decimals()` | Any ERC-20 |
+| `0x95d89b41` | `symbol()` | Any ERC-20 (returns dynamic string on most tokens, `bytes32` on some older ones — handle both) |
+| `0xa46fe83b` | `numAssets()` | Comet markets |
+| `0xc8c7fe6b` | `getAssetInfo(uint8)` | Comet markets — word[1] of the returned tuple is the asset address |
+| `0x2b92a07d` | `userCollateral(address,address)` | Comet markets — word[0] of the returned tuple is the balance |
+| `0xbf92857c` | `getUserAccountData(address)` | Aave Pool |
+| `0x28dd2d01` | `getUserReserveData(address,address)` | Aave DataProvider — NOT safe pre-redeployment, see section 6 |
+| `0xd2493b6c` | `getReserveTokensAddresses(address)` | Aave DataProvider — resolves aToken/debt-token addresses, see section 6 |
+| `0xb316ff89` | `getAllReservesTokens()` | Aave DataProvider or Compound context — returns the full reserve/asset list |
+| `0xddf252ad...` (32 bytes, see section 3) | `Transfer(address,address,uint256)` event topic0 | Any ERC-20 log filtering |
+
+---
+
 ## Target implementation architecture (for whoever builds this once testing is complete)
 
 This section captures the actual build plan, decided early in this project's design discussion,
@@ -641,7 +722,7 @@ a real gap to close before implementation starts, not an afterthought.
 
 ---
 
-
+## What's left to test (in priority order)
 
 1. ~~Polygon, native-genesis → current, log discovery~~ — **done**, see the Polygon section above
    (16 tokens found, zero errors, cross-validated against the real live cache).
