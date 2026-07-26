@@ -469,7 +469,7 @@ Polygon's `defi.compound` is now a 2-entry array in the actual API response, not
 | Aave live position | ✅ Confirmed real via direct `getUserAccountData` read — see current-holdings table above. |
 | Aave/Compound historical events (Supply, Borrow) | ✅ Confirmed real and locatable **once the correct chunk size is used** — two independently-supplied real transaction hashes (a Borrow and a Supply) were successfully decoded and matched exactly the expected event signature (independently re-verified against Aave's real GitHub source and a block explorer's own decoded log, not just memory), exact Pool address, exact wallet address. The original "zero results" scan for this exact range was wrong due to the chunking/error-detection bug described at the top of this document — not a real anomaly. |
 | Token/event discovery, genesis (block 0) → native genesis (80,406,107) | 🔴 **Not completed** — this is Polygon's 2020-2021 low-fee era, where the real safe chunk size is only ~101 blocks; the adaptive scan script (section 3) was run against this range and, after covering only ~3% of it over roughly 15 hours, was projected to need **~20 days** to finish exhaustively. **Stopped as impractical for this process.** See "What's left to test" below for the recommended approach. |
-| Token/event discovery, native genesis (80,406,107) → current | 🔴 **Not yet re-run with a provider that holds up at scale in this range** — this range is NOT part of the dense low-fee era (it's Dec 2025–present), so it should behave like Ethereum/BSC's successful re-verifications once pointed at a reliable provider/chunk-size combination for this specific range. This is a cheap, high-value re-run to do next (see below). |
+| Token/event discovery, native genesis (80,406,107) → current | ✅ **Fully closed.** Full-history scan completed both directions (incoming/outgoing), ~40 hours total wall-clock time using the corrected (empty-response-safe) scanner on Ankr — real measured throughput turned out roughly half of the initial short-sample estimate (~40hrs actual vs. ~21.5hrs projected), a useful reminder that short-sample throughput measurements can be optimistic for sustained long runs. **Zero unrecoverable errors.** Found 16 unique token contracts, including both debt tokens (`variableDebtPolUSDCn`, `variableDebtPolUSDT`) that a prior, buggy version of this same scan had silently missed — see the second critical finding at the top of this document for the full story of that bug and its fix. Cross-checked against the account owner's real live cache: every token in the cache's Polygon `tokens` list is present in this discovery result. |
 | Compound on Polygon | ✅ Closed — see current-holdings table; the "WBTC supply" transaction that originally seemed to be Aave was actually Compound (see section 5's lesson). |
 
 ### Base — Compound multi-market tested; native genesis found; rest in progress
@@ -643,12 +643,8 @@ a real gap to close before implementation starts, not an afterthought.
 
 
 
-1. **Polygon, native-genesis → current, log discovery** — re-run with the adaptive script (section 3)
-   pointed at a provider confirmed reliable for *this* range specifically (Ankr held up fine near
-   this era in earlier spot checks; confirm at full scale). This range is NOT the slow, dense-log era,
-   so this should be fast and cheap, unlike the pre-genesis range. This is the single most
-   valuable next test — it would close out real historical reconstruction for the period that
-   actually matters for this wallet's real Polygon holdings.
+1. ~~Polygon, native-genesis → current, log discovery~~ — **done**, see the Polygon section above
+   (16 tokens found, zero errors, cross-validated against the real live cache).
 2. **Polygon, block 0 → native genesis, log discovery** — the ~20-day-at-current-rate problem. Needs
    a scoping decision (see the three options already laid out below) before it can be called done.
 3. **Base token-balance correctness spot-check** — the TR3/NAFTY-style check (does at least one
