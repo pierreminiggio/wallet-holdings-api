@@ -562,14 +562,28 @@ smoothly accrues interest with each successive read (40.20 → 40.52 → 40.57),
 deposit-then-hold pattern with no further deposits/withdrawals. This is about as clean a confirmation
 as this testing effort has produced anywhere.
 
+**Base token-balance correctness spot-check**: ✅ done, on a genuinely meaningful token rather than
+an unidentified airdrop. **8LNDS** (`0x55f9c8992fc4abce5aca585bf8f18284a2379d4c`) showed a real,
+unexplained ~367.8 balance increase between two live-cache snapshots six hours apart — initially
+looked like a possible second NAFTY-style rebasing case. Investigated directly (a narrow, targeted
+log query on the exact 6-hour window, same technique that cracked the NAFTY and Polygon Aave
+mysteries earlier): found **7 real `Transfer` events, all in one transaction, all from the same
+sender** (the token's distribution/claim contract — the account owner confirmed 8LNDS is a real
+investment-platform token distributed to holders on claim/purchase, not an auto-compounding token).
+**The sum of those 7 transfers matches the observed balance growth exactly, to the 18th decimal.**
+This is the "normal" case (same as TR3 on Ethereum) — every balance change is fully explained by a
+real, discoverable event — in direct contrast to NAFTY's case, where balance grew with zero
+corresponding Transfer. Confirms the standard discovery+`balanceOf` method will correctly
+reconstruct 8LNDS's history.
+
 **Base testing is now substantially complete**: RPC, native genesis, token discovery (full history,
-419 tokens), Aave (config, DataProvider redeployment check, historical trend), and one of two new
-Compound markets (USDS) are all independently verified. The only real gaps left are the USDbC
-market (untested against a real position, but assumed working given the identical mechanism's
-four-for-four track record on other markets) and Base's overall token-balance correctness spot-check
-(TR3/NAFTY-style — hasn't been explicitly redone for any specific Base token yet, though the
-underlying mechanism is proven
-generically at this point across four chains).
+419 tokens — though see the second critical finding at the top of this document; this scan predates
+the empty-response-bug fix and should be treated with the same caution as Polygon's original run),
+Aave (config, DataProvider redeployment check, historical trend), one of two new Compound markets
+(USDS), and now a real token-correctness spot-check (8LNDS) are all independently verified. The only
+real gaps left are the USDbC market (untested against a real position, but assumed working given the
+identical mechanism's four-for-four track record on other markets) and cbBTC/native-ETH/USDC
+correctness checks specifically requested by the account owner but not yet completed.
 
 Confirmed with the account owner: no meaningful holdings on Avalanche for the test wallet.
 Deprioritized; reuse the same proven method later if ever needed, without dedicated testing.
