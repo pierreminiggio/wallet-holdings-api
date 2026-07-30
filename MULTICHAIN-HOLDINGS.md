@@ -677,10 +677,37 @@ need for a non-PHP dependency (none has, so far).
 
 - **A log-scanning utility** (e.g. `EvmLogScanner`) implementing the adaptive chunking algorithm from
   section 3 as a single, shared, reusable piece — not reimplemented ad hoc per chain or per call site.
-  Must support both failure modes found during testing: rate-limit errors (backoff, retry same range)
-  and density/timeout errors (shrink range, retry same start block). This is the single most
-  load-bearing piece of new code, since nearly every bug found during testing was a flaw in this
-  exact logic.
+  This is the single most load-bearing piece of new code, since nearly every bug found during testing
+  was a flaw in this exact logic. It must correctly handle **three distinct failure modes**, found
+  through real, repeated production-like testing, not just theorized:
+  1. **Rate-limit errors** (e.g. `"Too many requests"`, `"rate limit"` in the message, several
+     different exact wordings seen across providers) — back off and retry the *same* block range,
+     do not shrink it.
+  2. **Density/timeout errors** (e.g. `"Request timeout on the free plan"`) — the range itself may be
+     within the provider's nominal cap but still times out because too many logs exist in it (seen on
+     Polygon in both its 2020-2021 era *and*, surprisingly, near-current blocks; also seen on Base for
+     the wallet's own `Transfer` scans). Shrink the range and retry from the same start block.
+  3. **Pure transient flakiness** — the *exact same* query, at the *exact same* size, sometimes fails
+     and sometimes succeeds with no pattern tied to range size or density at all (confirmed directly:
+     the same narrow block range failed then succeeded on immediate retry with nothing about the
+     request changed). For this mode, neither backing off nor shrinking is the fix — a bounded number
+     of immediate/short-wait retries at the *same* size is what actually resolves it. A production
+     scanner should attempt a handful of quick retries at the current size *before* concluding a
+     failure is the rate-limit or density kind and reacting accordingly.
+  - **Critical correctness requirement, found only after the above three modes were already handled**:
+    success/failure detection must positively confirm the raw response is a well-formed JSON-RPC
+    response (contains either a `"result"` or an `"error"` key) before treating it as anything other
+    than a failure. A response that is empty or malformed (e.g. from a network-level timeout that
+    never reaches the provider, or a connection drop) must never be silently treated as "succeeded
+    with an empty result" — this exact bug caused a real, confirmed silent gap in an earlier version
+    of this logic during testing (a real token position was missed by a scan that had already reported
+    "zero errors, fully covered"). This is not a hypothetical edge case to guard against defensively;
+    it is a bug that was shipped, ran, and produced a wrong answer during this project's own testing.
+  - **Never run two scans concurrently against the same (chain, provider) pair for the same reason** —
+    confirmed directly that doing so roughly halves each scan's effective throughput (provider-side
+    rate limiting is shared across concurrent requests from the same key/IP, not per-request). The job
+    scheduler (see "Open design question" below) must serialize scans per provider, not just per
+    wallet.
 - **A date→block resolver**, per chain, using the bisection approach from section 2. Cache the result
   **per (chain, date)**, not per (wallet, date) — the answer is wallet-independent, so this is a huge,
   free optimization once more than one wallet uses the feature (every wallet asking about the same
@@ -693,6 +720,15 @@ need for a non-PHP dependency (none has, so far).
   `balanceOf(wallet)` call. **This is a hard requirement, not an optimization choice** — section 4
   proved that summing Transfer deltas silently produces wrong answers for rebasing/reflection tokens
   (real example: NAFTY on BSC). Never implement a delta-summing shortcut, even as a "fast path."
+  **Correctness must be validated across a token's full lifecycle, not just at "now"**: a token can
+  correctly show a zero balance today while having held a real, meaningful non-zero balance at
+  specific points in its past (e.g. an asset received via a swap, then supplied as DeFi collateral
+  minutes later — the wallet's own current holdings genuinely include a real "cbBTC balance of zero
+  now" that was non-zero for a real interval during its history). A reconstruction that only gets
+  today's zero right without correctly reconstructing the transient non-zero periods in between is
+  not actually correct, even though a naive "does today's number match" check would pass. Any test
+  suite for this feature needs cases that check point-in-time balances during a token's active window,
+  not just its current resting value.
 - **Compound/Aave historical reads**: reuse the *existing* `CompoundHoldingsClient`/`AaveHoldingsClient`
   logic almost as-is — both already do the right kind of point-in-time `eth_call`, they just need a
   block-number parameter threaded through instead of a hardcoded `"latest"`. For Aave specifically,
@@ -729,10 +765,28 @@ shape, so the two multichain surfaces behave consistently to callers.
 
 **Open design question, not yet resolved**: unlike SUI's GitHub-Action-based async model, an
 in-process PHP reconstruction can't realistically block a single HTTP request for a scan that might
-take hours (see Polygon's ~20-day worst-case estimate for its dense 2020-2021 era). This needs some
-kind of background/queued execution model *within* PHP (e.g. a cron-triggered worker script polling
-a job table) rather than a synchronous request-response cycle — this hasn't been designed yet and is
-a real gap to close before implementation starts, not an afterthought.
+take hours — and based on real, repeated measurement during this project's testing, "hours" is an
+understatement for the common case, not the worst case. Multiple full-history single-token scans on
+Base alone (a chain with one of the *better* real caps found) took **20-58 hours each** in practice,
+even after all known scanning bugs were fixed; a full wallet-wide multi-token scan will be
+substantially larger than any single-token scan measured so far. Concrete implications for whoever
+designs this:
+- A simple "cron runs once a minute, checks if the job finished" pattern is necessary but not
+  sufficient — the job needs to be **resumable across many, many invocations spanning multiple days**,
+  not just tolerant of one interruption. Store enough state (last-scanned block, current adaptive step
+  size, discovered-tokens-so-far) that a resume picks up exactly where a prior invocation left off,
+  with no wasted re-work and no risk of a gap at the resume boundary.
+- **Never schedule two reconstruction jobs against the same (chain, provider) pair concurrently** —
+  confirmed this roughly halves throughput for both. If multiple wallets need the same chain
+  reconstructed, queue them serially per provider, not in parallel.
+- Whoever owns this feature should set expectations accordingly: a "reconstruct my full history"
+  request for an active wallet on a chain with real transaction volume is a **multi-day background
+  job**, not a "check back in an hour" one, on current free-tier infrastructure. This may itself be
+  a reason to consider paid-tier RPC access for this specific feature even though `/holdings-now`
+  deliberately avoids it — worth an explicit product decision, not an assumption either way.
+
+This background-execution mechanism hasn't been designed yet and is a real gap to close before
+implementation starts, not an afterthought.
 
 ---
 
@@ -742,9 +796,11 @@ a real gap to close before implementation starts, not an afterthought.
    (16 tokens found, zero errors, cross-validated against the real live cache).
 2. **Polygon, block 0 → native genesis, log discovery** — the ~20-day-at-current-rate problem. Needs
    a scoping decision (see the three options already laid out below) before it can be called done.
-3. **Base token-balance correctness spot-check** — the TR3/NAFTY-style check (does at least one
-   real Base token's `balanceOf` match or diverge from its Transfer history) hasn't been explicitly
-   redone for a specific Base token yet, even though the underlying mechanism is proven generically.
+3. ~~Base token-balance correctness spot-check~~ — **done** for 8LNDS (see the Base section above);
+   **in progress** for cbBTC specifically (a full-history scan is running as of this writing,
+   checking whether transient non-zero balances during supply/withdraw cycles reconstruct correctly,
+   not just the current zero balance) — check back on this before considering Base's token
+   correctness fully closed.
 4. **Re-verify Ethereum's Aave/Compound historical trend checks** with the corrected methodology —
    these were direct point-reads (not chunked scans), so they're likely unaffected by the chunking
    bug, but haven't been explicitly re-confirmed post-discovery the way the log-scan-based findings
