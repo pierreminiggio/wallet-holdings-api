@@ -576,14 +576,28 @@ real, discoverable event — in direct contrast to NAFTY's case, where balance g
 corresponding Transfer. Confirms the standard discovery+`balanceOf` method will correctly
 reconstruct 8LNDS's history.
 
+**cbBTC full-history correctness check**: ✅ done, and this is the strongest validation this project
+has produced. Full history scanned (both directions, native-genesis → current, ~13.66M blocks, zero
+errors), finding **196 real `Transfer` events** spanning Sept 2025 → Jul 2026. Reconstructed the
+complete chronological running balance from these events and it **returns to exactly zero at every
+point where it should**, including dozens of real receive-then-immediately-supply-to-DeFi cycles —
+not just at the final, current balance. This directly validates the requirement the account owner
+specifically raised: reconstruction must get *transient* historical non-zero periods right (e.g. the
+wallet briefly holding cbBTC between a swap and a subsequent Compound/Aave supply), not merely
+reproduce today's resting balance. Zero discrepancies found anywhere across the full real history.
+
 **Base testing is now substantially complete**: RPC, native genesis, token discovery (full history,
 419 tokens — though see the second critical finding at the top of this document; this scan predates
 the empty-response-bug fix and should be treated with the same caution as Polygon's original run),
 Aave (config, DataProvider redeployment check, historical trend), one of two new Compound markets
-(USDS), and now a real token-correctness spot-check (8LNDS) are all independently verified. The only
-real gaps left are the USDbC market (untested against a real position, but assumed working given the
-identical mechanism's four-for-four track record on other markets) and cbBTC/native-ETH/USDC
-correctness checks specifically requested by the account owner but not yet completed.
+(USDS), and now real token-correctness spot-checks (8LNDS and, more thoroughly, cbBTC's full
+196-event history) are all independently verified. Native ETH needs no separate correctness check
+(not an ERC-20, no delta-vs-balance question applies). USDC only got a light spot-check (a small
+recent window, no anomalies found) rather than full-history coverage, a deliberate choice given how
+extremely standard/audited USDC is and how disproportionately expensive full coverage would be for
+such a high-traffic contract — not treated as fully proven the way 8LNDS/cbBTC are, but low risk.
+The only real gap left is the USDbC market (untested against a real position, but assumed working
+given the identical mechanism's four-for-four track record on other markets).
 
 Confirmed with the account owner: no meaningful holdings on Avalanche for the test wallet.
 Deprioritized; reuse the same proven method later if ever needed, without dedicated testing.
