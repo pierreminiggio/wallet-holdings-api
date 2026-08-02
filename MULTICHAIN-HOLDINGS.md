@@ -116,6 +116,36 @@ fi
 
 ---
 
+## ⚠️ THIRD CRITICAL FINDING — a scan's "current block" boundary goes stale the moment it's captured
+
+**Discovered via a direct, deliberate cross-check**: the account owner's real live cache showed a
+current Ethereum token holding (MORPHO) that Ethereum's "fully re-verified, zero errors" token
+discovery scan (see the Ethereum section below) had never found. This is a **third, distinct root
+cause** from the other two critical findings above — not a chunking bug, not a silently-swallowed
+empty response. The scan itself was genuinely correct for the range it covered; the range was simply
+**too old**. It had been bounded at the wallet's first-outgoing-transaction block, a number captured
+much earlier in this project's testing — but real time kept passing after that, the wallet kept
+transacting, and nothing ever re-extended the scan's end boundary to match. A ~2.1M-block gap between
+"what was last scanned" and "what block it actually is now" had silently accumulated, entirely
+unnoticed, because "zero errors, fully covered" was true and reported honestly **for the range that
+was actually scanned** — it just wasn't the whole real range.
+
+**Confirmed by directly targeting just the gap**: re-scanning from the old boundary to a freshly-
+resolved current block found 0 failed chunks and several more real tokens/events that no prior
+"complete" scan had ever seen — including MORPHO (exact balance match), USDC, and a fully
+opened-and-closed Aave WETH position, all real activity that happened entirely within the
+unscanned window.
+
+**Practical consequence — this is a design requirement, not just a testing lesson**: any production
+implementation must resolve `"latest"` freshly at the *start* of every scan run, and must never
+persist or reuse an old block number as an assumed-current boundary across separate runs without
+re-checking it first. A wallet's "fully reconstructed" state has an implicit "as of" timestamp
+(whenever the scan last ran) — treating that as permanently current, rather than re-validating or
+re-extending it before answering a new request, will silently under-report real, current holdings
+exactly the way it did here.
+
+---
+
 ## Reproducible test methodology — how to (re-)run everything
 
 This section is written so any of these tests can be re-run from scratch, on this wallet or a
@@ -435,7 +465,7 @@ finding a faster provider).
 |---|---|
 | Free RPC | ✅ `drpc.org` keyless for point-reads/small ranges; **NodeReal (free signup) for any log scanning**, confirmed reliable at 49,999-block chunks with zero failures across two large re-verification runs (see below). `publicnode.com` is keyless but refuses log queries on old blocks with an archive-token error, regardless of range size — not usable for this without a key. |
 | Native genesis | ✅ Block 13,024,431 (Aug 14 2021, 16:43:39 UTC), tx-confirmed: single incoming deposit of ≈0.444 ETH, exact value match to the balance at that block. |
-| Token discovery | ✅✅ **Re-verified twice** with the correct adaptive/error-checked method (NodeReal, 49,999-block chunks): 210 chunks (native genesis → first outgoing tx) and 261 chunks (block 0 → native genesis), **zero failed chunks in either run**. Found exactly one token, TR3, genesis block 12,420,246 — which predates native ETH funding by ~3 months. Nothing else, confirmed with real, trustworthy coverage. |
+| Token discovery | ✅✅✅ **Re-verified three times.** First two runs (NodeReal, 49,999-block chunks): 210 chunks (native genesis → first outgoing tx) and 261 chunks (block 0 → native genesis), zero failed chunks, found TR3 (genesis block 12,420,246, predates native ETH funding by ~3 months). **A third gap was then found and closed**: those first two runs' end boundary was a stale "current block" captured much earlier in testing — see the third critical finding at the top of this document. Re-scanning just the ~2.1M-block gap between that stale boundary and a freshly-resolved current block (0 failed chunks) found several more real tokens/events: MORPHO (exact balance match to the live cache), USDC (real Compound market activity), a fully opened-and-closed Aave WETH position, and two not-yet-identified token contracts. Ethereum's token discovery is now genuinely current, not just "correct as of an old snapshot." |
 | Token balance correctness | ✅ TR3's `balanceOf` exactly matches its single Transfer-in amount (well-behaved, non-rebasing token). |
 | Date→block resolution | ✅ Verified against a real block explorer date. |
 | Compound historical reads | ✅ Real position (Comet USDC market, WETH collateral): live value matched an independently-documented figure elsewhere in this codebase exactly; historical trend across 8 sampled dates (Nov 2025 – June 2026) is coherent (position opened, grew, wound down to dust) and matches the account owner's own memory. |
