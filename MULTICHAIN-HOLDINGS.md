@@ -478,7 +478,7 @@ finding a faster provider).
 |---|---|
 | Free RPC | ✅ **NodeReal (free signup)** — no working *keyless* option exists (tried and rejected: `drpc.org` rate-limited, `publicnode` archive-gated, official `bsc-dataseed` genuinely prunes old state (`"missing trie node"`), `1rpc.io`, `ankr` (needs key), `meowrpc`, `llamarpc`, `blockpi` down/unreachable). NodeReal confirmed reliable for archive reads and `eth_getLogs` at 49,999-block chunks. |
 | Native genesis | Not directly pinned down (wallet's BSC activity investigated was token-focused; native genesis not yet bisected — low priority, doesn't block anything currently understood). |
-| Token discovery | ✅✅ **Re-verified** with the correct method: 2,010 chunks across the full genesis-to-latest range, **zero failed chunks**. Found exactly one Transfer — NAFTY's genesis, tx-confirmed (block, timestamp, amount, and swap-router transaction hash all cross-checked). Nothing else. |
+| Token discovery | ✅✅✅ **Fully re-run and now genuinely closed.** A complete fresh scan (block 0 → freshly-resolved current block, ~2,260 chunks, zero errors, notably fast given NodeReal's consistent reliability throughout this whole project) found **15 unique token contracts** — including both `aBnbWBNB` and `variableDebtBnbUSDC`, the two real tokens the earlier "zero failed chunks" scan had missed. Confirms the fix works and the prior result genuinely was incomplete, not a false alarm. |
 | Token balance correctness | ⚠️ **Key finding, now on solid footing**: NAFTY's current `balanceOf` (29,451.567...) does not match its Transfer history (28,363.005... from the one discovered transfer) — a ~3.84% unexplained increase, zero matching Transfer events, confirmed with full trustworthy coverage. Treat as a rebasing/reflection-style token; this is the finding behind "never trust summed deltas" in section 4. |
 | Aave | ✅ **Fixed** — Aave V3 *is* deployed on BSC (Pool: `0x6807dc923806fE8Fd134338EABCA509979a7e0cB`, DataProvider: `0xc90Df74A7c16245c5F5C5870327Ceb38Fe5d5328`, both from the canonical `aave-address-book` registry). This project's `AaveHoldingsClient::POOLS` previously had no BSC entry, meaning `/holdings-now` was under-reporting this wallet's BSC Aave position — **now added**, along with a `DEFAULT_RPC_URLS` entry for BSC (`https://bsc-rpc.publicnode.com`, confirmed working for `"latest"`-only reads, which is all `/holdings-now` needs). The full mechanism (`getAllReservesTokens` → per-reserve `getUserReserveData` → `getUserAccountData` summary) was tested end-to-end against the real wallet, producing a correct, schema-matching result cross-checked against Zerion's own raw token amounts in the cache (`aBnbWBNB`/`variableDebtBnbUSDC`), which agreed within the expected interest-accrual drift. |
 | Compound | ✅ N/A — Compound III is not deployed on BSC (confirmed via search of official docs). |
@@ -836,25 +836,27 @@ implementation starts, not an afterthought.
 
 ## What's left to test (in priority order)
 
-1. ~~Polygon, native-genesis → current, log discovery~~ — **done**, see the Polygon section above
+1. ~~BSC full token discovery re-run~~ — **done**, see the BSC section above (15 tokens found, zero
+   errors, both previously-missed real tokens now present).
+2. ~~Polygon, native-genesis → current, log discovery~~ — **done**, see the Polygon section above
    (16 tokens found, zero errors, cross-validated against the real live cache).
-2. **Polygon, block 0 → native genesis, log discovery** — the ~20-day-at-current-rate problem. Needs
+3. **Polygon, block 0 → native genesis, log discovery** — the ~20-day-at-current-rate problem. Needs
    a scoping decision (see the three options already laid out below) before it can be called done.
-3. ~~Base token-balance correctness spot-check~~ — **done** for 8LNDS (see the Base section above);
-   **in progress** for cbBTC specifically (a full-history scan is running as of this writing,
-   checking whether transient non-zero balances during supply/withdraw cycles reconstruct correctly,
-   not just the current zero balance) — check back on this before considering Base's token
-   correctness fully closed.
-4. **Re-verify Ethereum's Aave/Compound historical trend checks** with the corrected methodology —
+4. ~~Base token-balance correctness spot-check~~ — **done** for both 8LNDS and cbBTC (see the Base
+   section above) — cbBTC's full 196-event history reconstructed cleanly with zero discrepancies.
+   Given what was just found on BSC, Base's own token discovery result (419 tokens, "zero errors")
+   should probably be treated with the same caution and re-checked against a few more known real
+   holdings before fully trusting it either.
+5. **Re-verify Ethereum's Aave/Compound historical trend checks** with the corrected methodology —
    these were direct point-reads (not chunked scans), so they're likely unaffected by the chunking
    bug, but haven't been explicitly re-confirmed post-discovery the way the log-scan-based findings
    were.
-5. **BSC native genesis** — never actually pinned down (low priority, doesn't block anything
+6. **BSC native genesis** — never actually pinned down (low priority, doesn't block anything
    currently understood, but a real gap in an otherwise-closed chain).
-6. **The async/background-execution design question** flagged in the architecture section above —
+7. **The async/background-execution design question** flagged in the architecture section above —
    how a multi-hour scan runs without blocking an HTTP request. Needs an actual design, not just the
    flag that it's unresolved.
-7. Only after the above: **build it** — the architecture section above is the blueprint; actual PHP
+8. Only after the above: **build it** — the architecture section above is the blueprint; actual PHP
    implementation (log scanner, cursor repository, endpoint wiring, DB schema) hasn't been started.
 
 No code for the multichain reconstruction feature should be written until this list is empty or its
