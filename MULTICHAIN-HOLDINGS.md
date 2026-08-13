@@ -146,6 +146,46 @@ exactly the way it did here.
 
 ---
 
+## ⚠️ FOURTH CRITICAL FINDING — density-related failures aren't confined to one historical era; they can be spread gradually across a chain's growth over time
+
+**Discovered via a deliberate cross-check of Base's original 419-token discovery result**: two known,
+real Base tokens (`aEthWETH`, `variableDebtBasUSDC` — the account owner's real Aave collateral/debt
+positions) were used as a targeted test of whether Base's original scan could be trusted. A full
+targeted scan of both tokens' complete history found real events (proving they genuinely are
+discoverable), but **554 of roughly 9,900 chunks failed even after patient retries** — a real,
+non-trivial gap.
+
+**Ruled out, with direct evidence, before accepting an explanation**: the failures were not random
+provider throttling. Comparing the set of block ranges that failed on a first retry pass against a
+second, differently-shaped retry pass (broader query, no wallet-specific topic filter) showed **100%
+overlap** — every range that failed the second time had also failed the first time, with zero new
+random failures appearing. Random/volume-based degradation would not produce this pattern; a
+consistent, repeatable, range-specific cause would.
+
+**Real explanation found by mapping the failing ranges to calendar dates**: the 298 failing ranges
+(deduplicated) are not clustered in one tight window — they're spread across roughly May 2025 through
+June 2026, with two rough peaks (mid-2025 and Oct-Dec 2025) and genuine troughs elsewhere. This
+pattern is consistent with **Base's own real transaction volume growing substantially since its
+launch** as adoption increased — meaning this chain's *more recent* history is generally denser and
+harder to exhaustively query than its earlier history, gradually, not because of one discrete event.
+This is the same underlying density-vs-provider-cap mechanism already documented for Polygon's
+2020-2021 era (see the top finding of this document) — but manifesting differently: Polygon's dense
+period was one historically bounded, unusually-low-fee era; Base's is a gradual density increase
+tracking real organic growth, spread across a much wider date range with no single clean boundary.
+
+**Practical consequence, confirmed directly — retrying the same chunk size, or changing query shape
+(e.g. dropping a topic filter), does not reliably fix a genuine density problem**, since neither
+approach reduces the actual amount of log data the provider has to process for that block range. The
+only approach consistent with this explanation that hadn't yet been tried at the time of writing:
+much smaller sub-chunks specifically for the identified dense stretches, rather than uniform retry
+logic across the whole range. **A production implementation's adaptive chunking (section 3) already
+handles this correctly by design** (shrink-on-failure) — this finding is really a confirmation that
+the *manual* retry scripts used ad hoc during testing (fixed chunk size, retry-only, no genuine
+shrinking) were the wrong tool for finishing off a stubborn subset of ranges, not a flaw in the
+documented production algorithm itself.
+
+---
+
 ## Reproducible test methodology — how to (re-)run everything
 
 This section is written so any of these tests can be re-run from scratch, on this wallet or a
@@ -616,18 +656,29 @@ specifically raised: reconstruction must get *transient* historical non-zero per
 wallet briefly holding cbBTC between a swap and a subsequent Compound/Aave supply), not merely
 reproduce today's resting balance. Zero discrepancies found anywhere across the full real history.
 
-**Base testing is now substantially complete**: RPC, native genesis, token discovery (full history,
-419 tokens — though see the second critical finding at the top of this document; this scan predates
-the empty-response-bug fix and should be treated with the same caution as Polygon's original run),
-Aave (config, DataProvider redeployment check, historical trend), one of two new Compound markets
-(USDS), and now real token-correctness spot-checks (8LNDS and, more thoroughly, cbBTC's full
-196-event history) are all independently verified. Native ETH needs no separate correctness check
-(not an ERC-20, no delta-vs-balance question applies). USDC only got a light spot-check (a small
-recent window, no anomalies found) rather than full-history coverage, a deliberate choice given how
-extremely standard/audited USDC is and how disproportionately expensive full coverage would be for
-such a high-traffic contract — not treated as fully proven the way 8LNDS/cbBTC are, but low risk.
-The only real gap left is the USDbC market (untested against a real position, but assumed working
-given the identical mechanism's four-for-four track record on other markets).
+**Base's original 419-token discovery result cross-checked directly, per the pattern that already
+caught real gaps on Ethereum and BSC**: targeted the wallet's real Aave collateral/debt tokens
+(`aEthWETH`, `variableDebtBasUSDC`) with a dedicated full-history scan. Real events were found for
+both, confirming they genuinely are discoverable via this method — but the scan also hit **554
+persistently-failing chunks** (about 5.6% of the total), later traced to a genuine density-related
+cause (see the fourth critical finding above), not a data-availability or query-shape problem.
+Roughly half of those (215, all a strict subset of the original 554 — see the fourth critical finding
+for how this was confirmed to be range-specific, not random) remain unresolved as of this writing.
+**Base's original full-wallet 419-token result should be treated the same way BSC's original result
+had to be: plausible, partially corroborated, but not proven complete** — the same class of problem
+already found and fixed on two other chains today very likely affects this one too, just not yet
+fully closed out.
+
+**Base testing is now substantially complete otherwise**: RPC, native genesis, Aave (config,
+DataProvider redeployment check, historical trend), one of two new Compound markets (USDS), and real
+token-correctness spot-checks (8LNDS and, more thoroughly, cbBTC's full 196-event history) are all
+independently verified. Native ETH needs no separate correctness check (not an ERC-20, no
+delta-vs-balance question applies). USDC only got a light spot-check (a small recent window, no
+anomalies found) rather than full-history coverage, a deliberate choice given how extremely
+standard/audited USDC is and how disproportionately expensive full coverage would be for such a
+high-traffic contract — not treated as fully proven the way 8LNDS/cbBTC are, but low risk. The USDbC
+Compound market remains untested against a real position (assumed working, per the four-for-four
+track record on other markets).
 
 Confirmed with the account owner: no meaningful holdings on Avalanche for the test wallet.
 Deprioritized; reuse the same proven method later if ever needed, without dedicated testing.
@@ -836,28 +887,38 @@ implementation starts, not an afterthought.
 
 ## What's left to test (in priority order)
 
-1. ~~BSC full token discovery re-run~~ — **done**, see the BSC section above (15 tokens found, zero
+1. **Base full token discovery re-run** — same treatment BSC just got. The original 419-token result
+   is confirmed to have real gaps (554 chunks failed on a targeted cross-check, 215 still unresolved
+   as of this writing, root cause understood — see the fourth critical finding above). Needs a full,
+   fresh re-run with genuine adaptive shrinking (not a fixed-size retry loop) to actually get through
+   the identified dense stretches, or a different provider tried against just the still-failing
+   ranges.
+2. ~~BSC full token discovery re-run~~ — **done**, see the BSC section above (15 tokens found, zero
    errors, both previously-missed real tokens now present).
-2. ~~Polygon, native-genesis → current, log discovery~~ — **done**, see the Polygon section above
+3. ~~Polygon, native-genesis → current, log discovery~~ — **done**, see the Polygon section above
    (16 tokens found, zero errors, cross-validated against the real live cache).
-3. **Polygon, block 0 → native genesis, log discovery** — the ~20-day-at-current-rate problem. Needs
+4. **Polygon, block 0 → native genesis, log discovery** — the ~20-day-at-current-rate problem. Needs
    a scoping decision (see the three options already laid out below) before it can be called done.
-4. ~~Base token-balance correctness spot-check~~ — **done** for both 8LNDS and cbBTC (see the Base
+5. ~~Base token-balance correctness spot-check~~ — **done** for both 8LNDS and cbBTC (see the Base
    section above) — cbBTC's full 196-event history reconstructed cleanly with zero discrepancies.
-   Given what was just found on BSC, Base's own token discovery result (419 tokens, "zero errors")
-   should probably be treated with the same caution and re-checked against a few more known real
-   holdings before fully trusting it either.
-5. **Re-verify Ethereum's Aave/Compound historical trend checks** with the corrected methodology —
+6. **BSC Aave historical trend across multiple dates** — config, live position, and discovery are all
+   proven; only current-state has been checked, not a decoded trend across dates the way
+   Ethereum/Polygon/Base got.
+7. **Polygon Aave — a proper multi-date decoded trend** — real events are tx-confirmed to exist, but
+   never got the clean multi-date read-and-decode treatment the other chains' Aave positions did.
+8. **Polygon token-balance correctness spot-check** — never done at all for Polygon specifically (the
+   NAFTY/TR3/8LNDS/cbBTC-style check that's been done on every other chain).
+9. **Re-verify Ethereum's Aave/Compound historical trend checks** with the corrected methodology —
    these were direct point-reads (not chunked scans), so they're likely unaffected by the chunking
    bug, but haven't been explicitly re-confirmed post-discovery the way the log-scan-based findings
    were.
-6. **BSC native genesis** — never actually pinned down (low priority, doesn't block anything
-   currently understood, but a real gap in an otherwise-closed chain).
-7. **The async/background-execution design question** flagged in the architecture section above —
-   how a multi-hour scan runs without blocking an HTTP request. Needs an actual design, not just the
-   flag that it's unresolved.
-8. Only after the above: **build it** — the architecture section above is the blueprint; actual PHP
-   implementation (log scanner, cursor repository, endpoint wiring, DB schema) hasn't been started.
+10. **BSC native genesis** — never actually pinned down (low priority, doesn't block anything
+    currently understood, but a real gap in an otherwise-closed chain).
+11. **The async/background-execution design question** flagged in the architecture section above —
+    how a multi-hour scan runs without blocking an HTTP request. Needs an actual design, not just the
+    flag that it's unresolved.
+12. Only after the above: **build it** — the architecture section above is the blueprint; actual PHP
+    implementation (log scanner, cursor repository, endpoint wiring, DB schema) hasn't been started.
 
 No code for the multichain reconstruction feature should be written until this list is empty or its
 remaining items are explicitly, consciously scoped out — per this project's "remove every shadow
