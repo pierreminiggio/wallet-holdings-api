@@ -184,6 +184,17 @@ the *manual* retry scripts used ad hoc during testing (fixed chunk size, retry-o
 shrinking) were the wrong tool for finishing off a stubborn subset of ranges, not a flaw in the
 documented production algorithm itself.
 
+**Confirmed directly**: applying genuine recursive adaptive shrinking (halving on failure down to a
+50-block floor, rather than retrying the same size) to the 215 still-unresolved ranges resolved
+**213 of them (99.1%)** — strong, direct confirmation that this really was a density problem, fixable
+by a correctly-implemented adaptive algorithm, not a fundamental data-availability issue. Two more
+real `aEthWETH` events were found in the process. The final 2 tiny 38-block windows that failed even
+at the shrink floor were resolved with one more patient, longer-timeout retry — turned out to be
+ordinary transient flakiness (same pattern as the earliest-Base-block flakiness found much earlier in
+this project), not a genuine data gap. **All 554 originally-failed chunks from this cross-check are
+now fully accounted for** — either as real discovered events or confirmed-empty ranges. Zero
+unresolved gaps remain for the two tokens tested.
+
 ---
 
 ## Reproducible test methodology — how to (re-)run everything
@@ -662,12 +673,19 @@ caught real gaps on Ethereum and BSC**: targeted the wallet's real Aave collater
 both, confirming they genuinely are discoverable via this method — but the scan also hit **554
 persistently-failing chunks** (about 5.6% of the total), later traced to a genuine density-related
 cause (see the fourth critical finding above), not a data-availability or query-shape problem.
-Roughly half of those (215, all a strict subset of the original 554 — see the fourth critical finding
-for how this was confirmed to be range-specific, not random) remain unresolved as of this writing.
-**Base's original full-wallet 419-token result should be treated the same way BSC's original result
-had to be: plausible, partially corroborated, but not proven complete** — the same class of problem
-already found and fixed on two other chains today very likely affects this one too, just not yet
-fully closed out.
+**All 554 have since been fully resolved**: 213 of the 215 that survived a first retry pass were
+closed by genuine recursive adaptive shrinking (halving down to a 50-block floor), and the last 2
+resolved with one more patient retry (ordinary transient flakiness, not a real gap). **These two
+specific tokens' history is now proven complete, with zero unresolved gaps.**
+
+This is strong, direct evidence the underlying *method* works reliably on Base once implemented
+correctly (100% eventual resolution rate, given genuine adaptive shrinking rather than fixed-size
+retries) — but it only directly proves these two tokens, not the full 419-token wallet-wide scan,
+which was never re-run in full with this same adaptive treatment. Given the method's now-demonstrated
+reliability, confidence in Base's overall token discovery is substantially higher than before this
+cross-check, even without redoing the entire 419-token scan from scratch — but that full re-run
+would still be the fully rigorous way to close this out completely, matching what was done for
+Ethereum and BSC.
 
 **Base testing is now substantially complete otherwise**: RPC, native genesis, Aave (config,
 DataProvider redeployment check, historical trend), one of two new Compound markets (USDS), and real
@@ -887,12 +905,12 @@ implementation starts, not an afterthought.
 
 ## What's left to test (in priority order)
 
-1. **Base full token discovery re-run** — same treatment BSC just got. The original 419-token result
-   is confirmed to have real gaps (554 chunks failed on a targeted cross-check, 215 still unresolved
-   as of this writing, root cause understood — see the fourth critical finding above). Needs a full,
-   fresh re-run with genuine adaptive shrinking (not a fixed-size retry loop) to actually get through
-   the identified dense stretches, or a different provider tried against just the still-failing
-   ranges.
+1. **Base full 419-token wallet-wide discovery re-run** — the two-token targeted cross-check
+   (`aEthWETH`, `variableDebtBasUSDC`) is now fully resolved with zero gaps, and proved the adaptive
+   shrinking method resolves 100% of the density-related failures once applied correctly (see the
+   fourth critical finding above). The full wallet-wide 419-token scan itself was never re-run with
+   this same treatment, though — that's the one remaining step to close Base out with the same
+   rigor Ethereum and BSC got.
 2. ~~BSC full token discovery re-run~~ — **done**, see the BSC section above (15 tokens found, zero
    errors, both previously-missed real tokens now present).
 3. ~~Polygon, native-genesis → current, log discovery~~ — **done**, see the Polygon section above
