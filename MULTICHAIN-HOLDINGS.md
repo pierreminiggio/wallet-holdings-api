@@ -354,15 +354,19 @@ covered per chunk in Polygon's 2020-2021 era, meaning a full historical scan of 
 was estimated at **~20 days** at the observed rate — genuinely impractical to run exhaustively via
 this manual/chat-driven process; see "What's left to test" below for how this was handled instead).
 
-**A second, distinct failure mode exists on top of the plain block-range cap**: some providers (seen
-on `drpc.org`) return a *different* error — a request timeout (e.g. `"Request timeout on the free
-tier..."`) — when a query's *result volume* is too large for the range requested, even if the range
-itself is under the nominal cap. This is a density problem, not a range-size problem, and it needs
-the same fix (shrink and retry) but must be triggered by a different error-message match than a
-rate-limit ("too many requests") error, which instead needs backoff-and-retry-same-size, not
-shrinking. A production implementation should handle both: match on the specific error text to
-decide "shrink the range" vs. "wait and retry the same range" rather than treating every error
-identically.
+**A second error-message shape exists on top of the plain block-range cap**: some providers (seen on
+`drpc.org`) return a *different* error — a request timeout (e.g. `"Request timeout on the free
+tier..."`) — distinct from the rate-limit wording. **Originally hypothesized to be a density problem
+(too many results for the range) requiring shrink-and-retry — this was empirically wrong and has
+been corrected** (see the Base section below for the diagnostic that disproved it). The timeout
+message is **intermittent and independent of range size**: confirmed via direct isolation testing
+that even a single-block query with an empty result can fail with the identical timeout message, then
+succeed on a bare retry with no change to the range. The correct handling is the **same as
+rate-limit**: backoff and retry the *same* range, never shrink. Shrinking on a timeout doesn't address
+the actual cause (transient free-tier server load) and just wastes requests fragmenting ranges that
+were never the problem. A production implementation should treat "rate limit" and "timeout" as the
+same class (transient — backoff, same range) and reserve shrinking for error text that doesn't match
+either known pattern (a genuine unknown, possibly range-related, failure).
 
 **A third variant of the rate-limit error message was found on Base**, beyond the two already
 documented above: `"You reached Public endpoint rate limit, please upgrade to paid plan"` — same
@@ -590,11 +594,13 @@ read-through.
 **Nonce at time of testing**: 1,084 — a genuinely active wallet on Base, more so than any other
 chain tested so far.
 
-**Token discovery**: full-history scan (block 0 → current, ~48.8M blocks) completed, using the
-adaptive shrink-on-timeout + retry-on-rate-limit script (section 3, extended with a second failure
-mode — see the new note below section 3). **Found 419 unique token contracts** this wallet has ever
-been sent or has sent on Base — consistent with the many airdropped/spam tokens already visible in
-the live `/holdings-now` cache (`$HALLOWEEN`, `DEGEN`, `GOKU`, etc.). Zero unrecoverable errors.
+**Token discovery**: full-history scan (block 0 → current, ~48.8M blocks), originally reported
+complete at **419 unique token contracts** — consistent with the many airdropped/spam tokens already
+visible in the live `/holdings-now` cache (`$HALLOWEEN`, `DEGEN`, `GOKU`, etc.). **That completeness
+claim needs re-checking**: the corrected-detection re-run (see "What's left to test" item 1) hit a
+hard stop at 87% coverage (262 tokens found so far) due to the timeout misclassification documented
+below — now fixed, re-run in progress, final count not yet confirmed. Until the re-run finishes
+end-to-end, treat 419 as the prior best estimate rather than a verified number.
 
 One honest gap versus earlier chains' scans: this run's output only logged chunks where something
 was *found* — empty-but-successful chunks left no trace, so there's no explicit final "blocks
@@ -607,11 +613,14 @@ needs re-litigating.
 
 **New provider failure mode discovered on this chain's `drpc` endpoint, on top of the earlier
 rate-limit case**: `"Request timeout on the free tier, please upgrade..."` (distinct error code from
-the rate-limit message) — appears tied to log density in a given range, same underlying cause as
-Polygon's tiny-cap-in-dense-eras finding, just manifesting as a timeout instead of a hard range-size
-rejection here. The fix is the same: shrink the range and retry, don't just back off and retry the
-same size. Any future scan script should handle both failure modes (rate-limit → backoff-and-retry
-same size; timeout/density → shrink range and retry) rather than just one.
+the rate-limit message). **Initially misdiagnosed as density-related (shrink-and-retry) — corrected
+after the re-run below got stuck at the shrink floor.** Direct diagnostic isolation (querying the
+exact failed 50-block chunk, then 25, then 10, then a single block) showed the *same* timeout message
+firing intermittently at every size down to one block with an empty result, and clearing on a bare
+retry with no range change. This is **transient free-tier flakiness, not density** — the fix is
+backoff-and-retry on the *same* range, identical to the rate-limit case, not shrinking. Any future
+scan script should treat "rate limit" and "timeout" as one transient class (backoff, same range) and
+reserve shrinking for genuinely unrecognized error text.
 
 **Aave DataProvider redeployment**: confirmed present on Base too, deployed June 10, 2025 — see
 section 6 above for the full cross-chain finding (all four chains tested redeployed within the same
@@ -905,12 +914,14 @@ implementation starts, not an afterthought.
 
 ## What's left to test (in priority order)
 
-1. **Base full 419-token wallet-wide discovery re-run** — the two-token targeted cross-check
-   (`aEthWETH`, `variableDebtBasUSDC`) is now fully resolved with zero gaps, and proved the adaptive
-   shrinking method resolves 100% of the density-related failures once applied correctly (see the
-   fourth critical finding above). The full wallet-wide 419-token scan itself was never re-run with
-   this same treatment, though — that's the one remaining step to close Base out with the same
-   rigor Ethereum and BSC got.
+1. **Base full 419-token wallet-wide discovery re-run** — 🟡 **in progress, not yet complete.** First
+   attempt reached 87% coverage (262 tokens) before hard-stopping on a chunk that kept failing even
+   at the shrink floor. Root cause found via direct diagnostic: the timeout error is intermittent and
+   size-independent, not density-related as originally assumed — shrinking never fixes it, only
+   backoff-and-retry-same-range does (see the corrected write-up in section 3 and in this chain's
+   error-mode note above). Script corrected accordingly; re-run resumed from saved state (no loss of
+   the 262 already-found tokens). Final coverage and token count still need confirming once the
+   corrected run reaches 100%.
 2. ~~BSC full token discovery re-run~~ — **done**, see the BSC section above (15 tokens found, zero
    errors, both previously-missed real tokens now present).
 3. ~~Polygon, native-genesis → current, log discovery~~ — **done**, see the Polygon section above
