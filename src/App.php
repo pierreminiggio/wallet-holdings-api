@@ -71,7 +71,9 @@ class App
 
         // "Today" isn't a meaningful cutoff for "what did the wallet hold on date X" if
         // X is still in progress; treat an omitted date the same as today (UTC).
-        $targetDate = $requestedDate ?? gmdate('Y-m-d');
+        $today = gmdate('Y-m-d');
+        $targetDate = $requestedDate ?? $today;
+        $isToday = $targetDate === $today;
 
         $config = $this->loadConfig();
         $fetcher = $this->createDatabaseFetcher($config);
@@ -97,6 +99,7 @@ class App
         $multichainCache = (new HoldingsNowCacheRepository($fetcher))->getCacheForDate($address, $targetDate);
 
         if ($multichainCache === null) {
+            var_dump('No cache and is_today'); die;
             http_response_code(404);
             echo json_encode(['message' => 'No cached holdings found for ' . $address . ' on '
                 . $targetDate . '. This endpoint only serves dates on which /holdings-now/'
