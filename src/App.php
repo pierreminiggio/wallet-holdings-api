@@ -99,7 +99,11 @@ class App
         $multichainCache = (new HoldingsNowCacheRepository($fetcher))->getCacheForDate($address, $targetDate);
 
         if ($multichainCache === null) {
-            var_dump('No cache and is_today'); die;
+            if ($isToday) {
+                $this->handleHoldingsNow($address);
+
+                return;
+            }
             http_response_code(404);
             echo json_encode(['message' => 'No cached holdings found for ' . $address . ' on '
                 . $targetDate . '. This endpoint only serves dates on which /holdings-now/'
