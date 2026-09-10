@@ -368,6 +368,20 @@ were never the problem. A production implementation should treat "rate limit" an
 same class (transient — backoff, same range) and reserve shrinking for error text that doesn't match
 either known pattern (a genuine unknown, possibly range-related, failure).
 
+**Caveat learned from a real multi-day run**: the per-request classification above (transient vs.
+shrink) is correct, but it isn't the whole picture. On denser, more recent chain history (roughly
+Base's late-2024+ activity level), a single free-tier provider can fail at a **sustained high rate
+across a wide span of blocks** — not an isolated hot zone, but near-random success/failure on chunks
+of many different sizes over hours. A real run measured **~14,000 blocks/day** in such a stretch,
+which projects to **hundreds of days** to finish the remaining history — backoff alone cannot fix
+this because the provider itself is throttling, exactly as its own error text says
+(`"...please upgrade to paid plan"`). The effective fix is **rotating across a small pool of
+different public RPC providers**, trying the next one immediately on any failure rather than backing
+off on the same one — this spreads load off any single throttled provider instead of just waiting it
+out. Backoff should only apply once the *entire pool* has failed for a given request. If pool
+rotation still isn't enough to reach a workable blocks/day rate, the next escalation is a paid RPC
+tier, not further script tuning.
+
 **A third variant of the rate-limit error message was found on Base**, beyond the two already
 documented above: `"You reached Public endpoint rate limit, please upgrade to paid plan"` — same
 underlying cause (backoff-and-retry-same-size, not shrink), just yet another different wording. Any
@@ -914,14 +928,30 @@ implementation starts, not an afterthought.
 
 ## What's left to test (in priority order)
 
-1. **Base full 419-token wallet-wide discovery re-run** — 🟡 **in progress, not yet complete.** First
-   attempt reached 87% coverage (262 tokens) before hard-stopping on a chunk that kept failing even
-   at the shrink floor. Root cause found via direct diagnostic: the timeout error is intermittent and
-   size-independent, not density-related as originally assumed — shrinking never fixes it, only
-   backoff-and-retry-same-range does (see the corrected write-up in section 3 and in this chain's
-   error-mode note above). Script corrected accordingly; re-run resumed from saved state (no loss of
-   the 262 already-found tokens). Final coverage and token count still need confirming once the
-   corrected run reaches 100%.
+1. **Base full 419-token wallet-wide discovery re-run** — 🟡 **in progress, not yet complete.**
+   Timeline of what's been learned across several attempts:
+   - First attempt reached 87% coverage (262 tokens) before hard-stopping on a chunk that kept
+     failing even at a 50-block shrink floor. Root cause: the timeout error is intermittent and
+     size-independent, not density-related — fixed with backoff-and-retry-same-range.
+   - Second attempt (with that fix) got stuck ~16 hours on a single 50-block zone
+     (`44661819-44661868`) that failed 209 times straight — a genuinely dense zone the 50-block
+     floor couldn't resolve. Fixed by lowering the shrink floor to 1 block, with a skip-and-log
+     mechanism for any single block that still can't be resolved (logged as a "known gap" for
+     manual follow-up rather than halting the whole scan).
+   - **Third attempt (5 days, interrupted manually) exposed a bigger problem**: only 70,117 blocks
+     progressed in 5 days (~14,000 blocks/day) — at that rate the remaining ~6.2M blocks would take
+     **~441 days**. The failure pattern in this stretch (roughly late-2024+ Base history, much
+     denser activity) was not isolated hot zones but near-random `shrink`/`transient`/`ok` outcomes
+     across many different chunk sizes — the signature of **structural free-tier throttling**, not
+     a range-size problem. The error text itself says as much: `"...please upgrade to paid plan"`.
+   - **Current fix**: rotate across a small pool of public Base RPC endpoints
+     (`base.drpc.org`, `mainnet.base.org`, `base-rpc.publicnode.com`, `rpc.ankr.com/base`),
+     trying the next provider immediately on any failure instead of backing off on the same one.
+     Backoff only kicks in once the whole pool has failed for a given request. **Not yet validated
+     at scale** — rotation was just deployed, need to confirm it actually restores an acceptable
+     blocks/day rate before trusting this approach for the remaining ~6.2M blocks. If the pool
+     rotation isn't enough on its own, the next escalation is a paid RPC tier (the error message's
+     own suggestion) rather than further script tuning.
 2. ~~BSC full token discovery re-run~~ — **done**, see the BSC section above (15 tokens found, zero
    errors, both previously-missed real tokens now present).
 3. ~~Polygon, native-genesis → current, log discovery~~ — **done**, see the Polygon section above
