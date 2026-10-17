@@ -368,19 +368,16 @@ were never the problem. A production implementation should treat "rate limit" an
 same class (transient — backoff, same range) and reserve shrinking for error text that doesn't match
 either known pattern (a genuine unknown, possibly range-related, failure).
 
-**Caveat learned from a real multi-day run**: the per-request classification above (transient vs.
-shrink) is correct, but it isn't the whole picture. On denser, more recent chain history (roughly
-Base's late-2024+ activity level), a single free-tier provider can fail at a **sustained high rate
-across a wide span of blocks** — not an isolated hot zone, but near-random success/failure on chunks
-of many different sizes over hours. A real run measured **~14,000 blocks/day** in such a stretch,
-which projects to **hundreds of days** to finish the remaining history — backoff alone cannot fix
-this because the provider itself is throttling, exactly as its own error text says
-(`"...please upgrade to paid plan"`). The effective fix is **rotating across a small pool of
-different public RPC providers**, trying the next one immediately on any failure rather than backing
-off on the same one — this spreads load off any single throttled provider instead of just waiting it
-out. Backoff should only apply once the *entire pool* has failed for a given request. If pool
-rotation still isn't enough to reach a workable blocks/day rate, the next escalation is a paid RPC
-tier, not further script tuning.
+**Caveat learned from a real multi-day run, then corrected**: a first pass at the classification
+above *conflated* `transient` and `shrink` into one backoff-and-retry loop. On denser, more recent
+chain history, a deterministic range/result-size-cap error (`shrink`) was retried with up to ~4
+minutes of pointless backoff before finally shrinking, since the same range always fails the same
+way. A real run measured only **~14,000 blocks/day** (hundreds of days projected), which looked like
+structural provider throttling (the error text's `"...please upgrade to paid plan"` encouraged that
+read) but was mostly this bug. **The fix that mattered**: `shrink` errors shrink *immediately*;
+backoff is reserved for non-deterministic `transient`/`malformed` errors. That alone took throughput
+to ~20,000+ blocks/minute. A 2-provider pool (see the Base section) adds modest redundancy, but the
+single provider would likely have been fine — check the retry logic before blaming throttling.
 
 **A third variant of the rate-limit error message was found on Base**, beyond the two already
 documented above: `"You reached Public endpoint rate limit, please upgrade to paid plan"` — same
@@ -608,13 +605,15 @@ read-through.
 **Nonce at time of testing**: 1,084 — a genuinely active wallet on Base, more so than any other
 chain tested so far.
 
-**Token discovery**: full-history scan (block 0 → current, ~48.8M blocks), originally reported
-complete at **419 unique token contracts** — consistent with the many airdropped/spam tokens already
-visible in the live `/holdings-now` cache (`$HALLOWEEN`, `DEGEN`, `GOKU`, etc.). **That completeness
-claim needs re-checking**: the corrected-detection re-run (see "What's left to test" item 1) hit a
-hard stop at 87% coverage (262 tokens found so far) due to the timeout misclassification documented
-below — now fixed, re-run in progress, final count not yet confirmed. Until the re-run finishes
-end-to-end, treat 419 as the prior best estimate rather than a verified number.
+**Token discovery**: full-history scan (block 0 → chain head, ~52M blocks), **re-run completed
+end-to-end** after several rounds of debugging (see "What's left to test" item 1). **Found 459 unique
+token contracts**, up from the original 419 — the corrected detection method catches a few the first
+pass missed. 4 individual blocks (`44661819`, `44661820`, `44692818`, `44692819`) could not be
+resolved even at 1-block granularity across both providers and are logged in
+`base-scan-known-gaps.txt`. Manually checked on BaseScan: no transaction in these 4 blocks involves
+the wallet as sender/recipient. Residual (accepted) risk: a token pushed *to* the wallet by a third
+party in one of these blocks would only show in the event logs, which that check doesn't cover — 4
+blocks out of ~52 million, and only material if that token appears nowhere else in the history.
 
 One honest gap versus earlier chains' scans: this run's output only logged chunks where something
 was *found* — empty-but-successful chunks left no trace, so there's no explicit final "blocks
@@ -703,12 +702,9 @@ specific tokens' history is now proven complete, with zero unresolved gaps.**
 
 This is strong, direct evidence the underlying *method* works reliably on Base once implemented
 correctly (100% eventual resolution rate, given genuine adaptive shrinking rather than fixed-size
-retries) — but it only directly proves these two tokens, not the full 419-token wallet-wide scan,
-which was never re-run in full with this same adaptive treatment. Given the method's now-demonstrated
-reliability, confidence in Base's overall token discovery is substantially higher than before this
-cross-check, even without redoing the entire 419-token scan from scratch — but that full re-run
-would still be the fully rigorous way to close this out completely, matching what was done for
-Ethereum and BSC.
+retries). That cross-check only proved these two tokens at the time; the full wallet-wide re-run has
+since been completed with the same adaptive treatment (459 tokens, see "Token discovery" above), which
+closes this out with the same rigor as Ethereum and BSC.
 
 **Base testing is now substantially complete otherwise**: RPC, native genesis, Aave (config,
 DataProvider redeployment check, historical trend), one of two new Compound markets (USDS), and real
@@ -928,30 +924,31 @@ implementation starts, not an afterthought.
 
 ## What's left to test (in priority order)
 
-1. **Base full 419-token wallet-wide discovery re-run** — 🟡 **in progress, not yet complete.**
-   Timeline of what's been learned across several attempts:
-   - First attempt reached 87% coverage (262 tokens) before hard-stopping on a chunk that kept
-     failing even at a 50-block shrink floor. Root cause: the timeout error is intermittent and
-     size-independent, not density-related — fixed with backoff-and-retry-same-range.
-   - Second attempt (with that fix) got stuck ~16 hours on a single 50-block zone
-     (`44661819-44661868`) that failed 209 times straight — a genuinely dense zone the 50-block
-     floor couldn't resolve. Fixed by lowering the shrink floor to 1 block, with a skip-and-log
-     mechanism for any single block that still can't be resolved (logged as a "known gap" for
-     manual follow-up rather than halting the whole scan).
-   - **Third attempt (5 days, interrupted manually) exposed a bigger problem**: only 70,117 blocks
-     progressed in 5 days (~14,000 blocks/day) — at that rate the remaining ~6.2M blocks would take
-     **~441 days**. The failure pattern in this stretch (roughly late-2024+ Base history, much
-     denser activity) was not isolated hot zones but near-random `shrink`/`transient`/`ok` outcomes
-     across many different chunk sizes — the signature of **structural free-tier throttling**, not
-     a range-size problem. The error text itself says as much: `"...please upgrade to paid plan"`.
-   - **Current fix**: rotate across a small pool of public Base RPC endpoints
-     (`base.drpc.org`, `mainnet.base.org`, `base-rpc.publicnode.com`, `rpc.ankr.com/base`),
-     trying the next provider immediately on any failure instead of backing off on the same one.
-     Backoff only kicks in once the whole pool has failed for a given request. **Not yet validated
-     at scale** — rotation was just deployed, need to confirm it actually restores an acceptable
-     blocks/day rate before trusting this approach for the remaining ~6.2M blocks. If the pool
-     rotation isn't enough on its own, the next escalation is a paid RPC tier (the error message's
-     own suggestion) rather than further script tuning.
+1. ~~Base full wallet-wide discovery re-run~~ — **done**. **459 unique token contracts found**
+   (up from 419), block 0 → chain head, 4 unresolved blocks manually checked (see above). Timeline of
+   what it took, kept for the next time something similar comes up:
+   - Attempt 1 reached 87% (262 tokens) then hard-stopped on a chunk failing even at a 50-block
+     floor. Cause: the `"Request timeout on the free plan"` error is intermittent and
+     size-independent, not density-related — shrinking never fixes it, backoff-and-retry does.
+   - Attempt 2 got stuck ~16 hours on `44661819-44661868` (209 failures in a row), a genuinely dense
+     zone the 50-block floor couldn't resolve. Fix: shrink floor lowered to 1 block, plus a
+     skip-and-log mechanism ("known gap") so one bad block can't halt a multi-day scan.
+   - Attempt 3 (5 days) progressed only ~14,000 blocks/day (~441 days projected). This was first
+     read as structural free-tier throttling, which led to adding a multi-provider pool.
+   - **Actual root cause was our own retry logic**: `shrink`-class errors (a deterministic
+     range/result-size cap — the same range always fails the same way) went through the same
+     backoff loop as genuinely transient errors, wasting up to ~4 minutes of pointless backoff per
+     chunk. Fix: `shrink` shrinks immediately; backoff is only for `transient`/`malformed`.
+   - Of the 4 pooled providers, `base-rpc.publicnode.com` (needs a paid token for archive requests)
+     and `rpc.ankr.com/base` (needs an API key for `eth_getLogs`) were unusable without auth. Their
+     `Unauthorized`-style errors were misclassified as range caps and triggered pointless shrinking.
+     Pool trimmed to `base.drpc.org` and `mainnet.base.org` (hard 2,000-block `eth_getLogs` cap,
+     handled fine by immediate shrink).
+   - Result: ~20,000–24,000 blocks/minute sustained (one ~2-hour dip, likely laptop sleep/network),
+     and the scan finished in a further session.
+   - Known gaps: `44661819-44661820` (the zone that resisted for 16 hours) and `44692818-44692819`
+     (new). Checked on BaseScan: no match for the wallet in their transactions; incoming third-party
+     transfers visible only in logs are not covered by that check (accepted residual risk).
 2. ~~BSC full token discovery re-run~~ — **done**, see the BSC section above (15 tokens found, zero
    errors, both previously-missed real tokens now present).
 3. ~~Polygon, native-genesis → current, log discovery~~ — **done**, see the Polygon section above
