@@ -1050,6 +1050,11 @@ query builder has no `UPDATE`/upsert.
    - 2026-10-01 and latest block: zero everywhere (account data and all 16 tokens), so the position
      was closed between 2026-09-01 and 2026-10-01 (exact date not pinned). The opening date within
      October 2025 is likewise not pinned.
+   - Independent cross-check against a saved live cache from 2026-07-19 (produced by `/holdings-now`
+     at that time): WBNB supplied 0.191077051909008933 and USDC variable debt 45.2339302682438592
+     (account $108.43 collateral / $45.23 debt, HF 1.80) both fall between the 2026-07-01 and
+     2026-08-01 point reads (WBNB 0.191075962 → 0.191077645; USDC debt 45.158 → 45.291), as steady
+     interest accrual predicts.
 7. ~~Polygon Aave — a proper multi-date decoded trend~~ — **done (Oct 17 2026).** Same method as
    item 6 on `polygon.drpc.org`: all 21 Polygon reserves (note: two reserves share the symbol
    `USDC`, native and bridged; the output does not distinguish them), 17 UTC dates (2025-12-20 →
@@ -1066,6 +1071,11 @@ query builder has no `UPDATE`/upsert.
    - 2026-10-01 and latest block: zero everywhere, so the position was closed between 2026-09-01 and
      2026-10-01 (exact date not pinned). The "Aave collateral / debt / health factor" rows of the
      current-holdings table in the Polygon section are an older snapshot and no longer current.
+   - Independent cross-check against the same saved live cache from 2026-07-19: WBTC supplied
+     0.00352738, USDT0 variable debt 75.090104, USDC variable debt 37.656972 (account $227.24 / $112.69,
+     HF 1.57) each fall between the 2026-07-01 and 2026-08-01 point reads (WBTC 0.00352735 →
+     0.00352740; USDT0 74.860 → 75.242; USDC 37.545 → 37.732). This also dates the Polygon
+     current-holdings table's Aave figures to about mid-July 2026.
 8. **Polygon token-balance correctness spot-check** — never done at all for Polygon specifically (the
    NAFTY/TR3/8LNDS/cbBTC-style check that's been done on every other chain).
 9. ~~Re-verify Ethereum's Aave/Compound historical trend checks~~ — **done (Oct 17 2026).** Direct
