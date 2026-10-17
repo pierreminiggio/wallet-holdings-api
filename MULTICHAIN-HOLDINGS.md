@@ -810,23 +810,28 @@ need for a non-PHP dependency (none has, so far).
 - **A log-scanning utility** (e.g. `EvmLogScanner`) implementing the adaptive chunking algorithm from
   section 3 as a single, shared, reusable piece — not reimplemented ad hoc per chain or per call site.
   This is the single most load-bearing piece of new code, since nearly every bug found during testing
-  was a flaw in this exact logic. It must correctly handle **three distinct failure modes**, found
-  through real, repeated production-like testing, not just theorized:
-  1. **Rate-limit errors** (e.g. `"Too many requests"`, `"rate limit"` in the message, several
-     different exact wordings seen across providers) — back off and retry the *same* block range,
-     do not shrink it.
-  2. **Density/timeout errors** (e.g. `"Request timeout on the free plan"`) — the range itself may be
-     within the provider's nominal cap but still times out because too many logs exist in it (seen on
-     Polygon in both its 2020-2021 era *and*, surprisingly, near-current blocks; also seen on Base for
-     the wallet's own `Transfer` scans). Shrink the range and retry from the same start block.
-  3. **Pure transient flakiness** — the *exact same* query, at the *exact same* size, sometimes fails
-     and sometimes succeeds with no pattern tied to range size or density at all (confirmed directly:
-     the same narrow block range failed then succeeded on immediate retry with nothing about the
-     request changed). For this mode, neither backing off nor shrinking is the fix — a bounded number
-     of immediate/short-wait retries at the *same* size is what actually resolves it. A production
-     scanner should attempt a handful of quick retries at the current size *before* concluding a
-     failure is the rate-limit or density kind and reacting accordingly.
-  - **Critical correctness requirement, found only after the above three modes were already handled**:
+  was a flaw in this exact logic. It must correctly tell apart **two classes of failure** (an earlier
+  version of this blueprint listed three modes and said timeouts should shrink the range — that was
+  wrong, see the Base section), and react to each differently:
+  1. **Transient errors — back off and retry the *same* block range, never shrink.** This covers
+     rate-limit wordings (`"Too many requests"`, `"rate limit"`, several variants across providers),
+     `"Request timeout on the free plan"` (confirmed intermittent and size-independent: it failed on a
+     single-block, empty-result query, then succeeded on a bare retry), and pure flakiness (same
+     query, same size, sometimes fails, sometimes succeeds). Use bounded exponential backoff.
+  2. **Deterministic range/result-size caps — shrink *immediately*, spend no backoff.** E.g.
+     `"eth_getLogs is limited to a 2,000 range"` or `"ranges over 10000 blocks are not supported"`:
+     the same range fails the same way every time, so waiting is pure waste. Conflating this class
+     with class 1 cost a real Base run ~4 minutes per chunk and collapsed throughput to ~14,000
+     blocks/day; separating them restored ~20,000+ blocks/minute.
+  - **Auth errors are neither** (`"Unauthorized ... API key"`, `"Archive requests require a personal
+    token"`, `"invalid params"` from a key-gated provider): no amount of waiting or shrinking fixes
+    them. Detect them separately and treat the provider as unusable for that call rather than letting
+    them fall into the shrink path (they did in the Base re-run, causing pointless shrinking).
+  - **Shrink floor is 1 block, not a "reasonable minimum"** (a 50-block floor got a real run stuck
+    for ~16 hours). If a *single block* still can't be fetched after bounded retries on every
+    configured provider, do not halt the job: record the block as an unresolved gap and move on
+    (see "Hardcoded skipped-blocks configuration" below).
+  - **Critical correctness requirement, found only after the above failure classes were already handled**:
     success/failure detection must positively confirm the raw response is a well-formed JSON-RPC
     response (contains either a `"result"` or an `"error"` key) before treating it as anything other
     than a failure. A response that is empty or malformed (e.g. from a network-level timeout that
@@ -886,7 +891,45 @@ need for a non-PHP dependency (none has, so far).
   needs archive-capable, log-scanning-capable endpoints, which are chain-specific based on testing
   so far: `drpc.org` for Ethereum and Base (both confirmed reliable there), NodeReal (free signup)
   for Ethereum and BSC, Ankr (free signup) for Polygon. This mapping should live in its own config
-  array, not overload `DEFAULT_RPC_URLS`.
+  array, not overload `DEFAULT_RPC_URLS`. Note for Base: keyless `base-rpc.publicnode.com`
+  (archive requests need a paid token) and `rpc.ankr.com/base` (needs an API key for `eth_getLogs`)
+  do **not** work for historical log scans; `mainnet.base.org` works but caps `eth_getLogs` at 2,000
+  blocks, so it only suits a secondary role next to `drpc.org`.
+
+### Hardcoded skipped-blocks configuration (per chain)
+
+**Decision**: the reconstruction code keeps a **hardcoded, per-chain list of blocks the scanner must
+never query** — a constant in code (not `config.php`, not the database), reviewed and edited by hand
+in a normal commit, e.g. a `RECONSTRUCTION_SKIPPED_BLOCKS` constant keyed by chain, each entry a
+single block number or a `[from, to]` range.
+
+- **Why**: some blocks can't be fetched through free-tier providers even at 1-block granularity
+  (dense blocks that time out on every attempt). Without this list, every wallet's scan would
+  re-discover the same dead block, burn the full retry budget on it, and risk stalling. With it, the
+  scanner splits its chunks *around* listed blocks and treats them as already covered.
+- **Scanner behavior**: chunk boundaries skip listed blocks entirely (no request ever sent for
+  them). A scan that hits a **new** unresolvable single block at runtime must not halt: it records
+  the block in a persistent "unresolved blocks" record (so a human can see it) and continues. A
+  human then verifies it on a block explorer and promotes it into the hardcoded list.
+- **Honest limitation to surface**: a skipped block is a known, accepted hole. A transfer *to* the
+  wallet from a third party inside a skipped block is only visible in event logs and would be missed
+  if that token appears nowhere else in the history. Keep a short comment next to every entry saying
+  what was verified (e.g. "no direct wallet tx on BaseScan; incoming-only transfers unchecked").
+- **Scope caveat**: the Base blocks below were found during one wallet's scan. The cause looks
+  block-level (density on the provider side), so they likely fail for other wallets too, but that
+  hasn't been tested — don't assume a listed block is safe to skip for a *different* wallet without
+  re-checking it the first time that wallet's scan reaches it.
+
+**Entries to add when this is implemented** (found during the Base full re-run, see "What's left to
+test" item 1; all four manually checked on BaseScan for direct wallet transactions — none found):
+
+| Chain | Blocks | Note |
+|-------|--------|------|
+| Base | `44661819`, `44661820` | Zone that stalled a scan for ~16 hours; fails even as a single block |
+| Base | `44692818`, `44692819` | Second zone, same behavior at 1-block granularity |
+
+Other chains have no known skipped blocks yet; their lists start empty. Any chain's future full
+re-run that logs unresolved gaps should add them here the same way.
 
 ### Endpoint
 
@@ -949,6 +992,8 @@ implementation starts, not an afterthought.
    - Known gaps: `44661819-44661820` (the zone that resisted for 16 hours) and `44692818-44692819`
      (new). Checked on BaseScan: no match for the wallet in their transactions; incoming third-party
      transfers visible only in logs are not covered by that check (accepted residual risk).
+     To be added to the hardcoded per-chain skipped-blocks config once implemented (see the
+     architecture section).
 2. ~~BSC full token discovery re-run~~ — **done**, see the BSC section above (15 tokens found, zero
    errors, both previously-missed real tokens now present).
 3. ~~Polygon, native-genesis → current, log discovery~~ — **done**, see the Polygon section above
