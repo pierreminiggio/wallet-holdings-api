@@ -6,7 +6,9 @@ and record deviations here. The blueprint and every verified finding it relies o
 [`MULTICHAIN-HOLDINGS.md`](MULTICHAIN-HOLDINGS.md) (all pre-build items there are closed or
 explicitly scoped out); project conventions live in [`AGENTS.md`](AGENTS.md).
 
-Status: **not started** (plan written Oct 17 2026).
+Status: **plan complete and all decisions confirmed (Oct 17 2026); implementation not started.**
+The build happens in later conversations, one delivery at a time, starting with delivery 1 (see
+section 8 for how to pick the work up).
 
 ---
 
@@ -61,12 +63,17 @@ For each supported chain, in lockstep per day:
 | 1 | **"Holdings on date D" = end of day D**: state at the last block whose timestamp is before `D+1 00:00:00 UTC`. Today still goes through `/holdings-now`. | **Confirmed** |
 | 2 | **Supported chains: Ethereum, Base, Polygon, BSC** (the four tested). | **Confirmed** |
 | 3 | **Unsupported chains are returned as if the wallet held nothing there, with an extra key** marking them. Reconstructed rows contain an entry for each chain in `UNSUPPORTED_CHAIN_KEYS` (initially `avalanche`, `xdai`, the two non-tested chains the live cache has returned) shaped exactly like an empty chain plus `"reconstruction_supported": false`. See the example below. | **Confirmed** (key name is a proposal) |
-| 4 | **Existing rows win**: a date that already has any row (a `live` row from `/holdings-now`) is served as-is; the walk never writes a `reconstructed` row for it (otherwise `getCacheForDate()`, which returns the newest `cached_at`, would let the reconstructed row shadow the live one). The walk still advances its cursor through that date. | Proposed |
-| 5 | **Concurrency**: one lock per (chain, provider) (file lock, `flock`, directory in config). A concurrent request that cannot take it gets **409** with `Retry-After`; it is not a job status, just contention. The walk also uses `ignore_user_abort(true)` and no PHP time limit, so a client disconnect does not kill a day half-way. Assumes a single web server (shared-hosting style); revisit if the API is ever deployed on several instances. | Proposed |
-| 6 | **Before genesis**: `400` only if **no supported chain** has any activity by the requested date; otherwise chains with nothing yet are simply empty. `500` = cache inconsistency (cursor says the date is walked but no row exists), `502` = RPC/provider failure after bounded retries. Same shape as `/sui-holdings`. | Proposed |
+| 4 | **Existing rows win**: a date that already has any row (a `live` row from `/holdings-now`) is served as-is; the walk never writes a `reconstructed` row for it (otherwise `getCacheForDate()`, which returns the newest `cached_at`, would let the reconstructed row shadow the live one). The walk still advances its cursor through that date. | **Confirmed** |
+| 5 | **Concurrency**: one lock per (chain, provider) (file lock, `flock`, directory in config). A concurrent request that cannot take it gets **409** with `Retry-After`; it is not a job status, just contention. The walk also uses `ignore_user_abort(true)` and no PHP time limit, so a client disconnect does not kill a day half-way. Assumes a single web server (shared-hosting style); revisit if the API is ever deployed on several instances. | **Confirmed** |
+| 6 | **Before genesis**: `400` only if **no supported chain** has any activity by the requested date; otherwise chains with nothing yet are simply empty. `500` = cache inconsistency (cursor says the date is walked but no row exists), `502` = RPC/provider failure after bounded retries. Same shape as `/sui-holdings`. | **Confirmed** |
 | 7 | **Per-chain history start**: block 0 for Ethereum, Base, BSC; **80,406,107 for Polygon** (decision of item 4, a documented limitation). Kept as a per-chain constant, not baked into the scanner. | Confirmed (item 4) |
 
-Decisions 4 to 6 are proposals: confirm or change them before delivery 5.
+Decisions 1 to 7 are all confirmed. The only thing still open is cosmetic: the name of the extra key
+(`reconstruction_supported`), which can be renamed at delivery 4 without any other impact.
+
+**Chain keys** used everywhere (response bodies, `evm_block_by_date.chain`, the cursor table, config)
+are the live cache's keys: `ethereum`, `base`, `polygon`, `binance-smart-chain` (supported) and
+`avalanche`, `xdai` (unsupported).
 
 ### Response shape for unsupported chains
 
@@ -159,7 +166,7 @@ ALTER TABLE `multichain_reconstruction_cursor`
   second). Growth: one row per chain per day walked plus progress rows; acceptable, prune later
   only if it ever matters.
 
-### Table 3 — `multichain_reconstruction_unresolved_block` (delivery 3 or 5)
+### Table 3 — `multichain_reconstruction_unresolved_block` (delivery 3)
 
 The persistent "unresolved blocks" record from the blueprint: a block that could not be fetched
 even alone, on every configured provider, after bounded retries. The scan records it and moves on;
@@ -227,7 +234,8 @@ for review, the same way the Node verification scripts were used.
 
 - Adaptive chunking per the blueprint (section 3 of `MULTICHAIN-HOLDINGS.md`): the two failure
   classes, 1-block shrink floor, skipped-blocks list honored, unresolvable block recorded (Table 3
-  introduced here if the scanner owns the write, otherwise in delivery 5) and the scan continues.
+  and its repository are introduced here; README migration block + subsection updated) and the scan
+  continues.
 - Resumable state object (`last_scanned_block`, `step_size`, tokens found) serializable to the cursor.
 - **Tests with a fake RPC** for: transient error then success, range cap, auth error, empty body,
   malformed body, a single block failing on every provider (recorded as a gap, scan continues), a
@@ -247,14 +255,13 @@ for review, the same way the Node verification scripts were used.
 
 ### Delivery 5 — Cursor, lock and reconstruction service
 
-- Table 2 (+ Table 3 if not yet created), `MultichainReconstructionCursorRepository`,
+- Table 2, `MultichainReconstructionCursorRepository`,
   `MultichainHoldingsReconstructionService` (Phase 0, the day loop, per-day row write, cursor
   advance only after the row, outcomes `found` / `before_genesis` / `inconsistent` / `provider_error`
   / `busy`), the per-(chain, provider) file lock. README migration block + subsection updated.
 - **Tests with a fake scanner and fake repositories**: interrupt after day N and resume (no hole,
   cursor never ahead of its rows); a date that already has a live row is skipped but the cursor
   moves past it; `before_genesis`; `inconsistent`; two overlapping requests (the second gets `busy`).
-- Decisions 4 to 6 in section 2 must be confirmed before this delivery.
 
 ### Delivery 6 — Endpoint wiring, docs, end-to-end
 
@@ -325,7 +332,37 @@ Polygon native USDC (`0x3c499c542cef5e3811e1192ce70d8cc03d5c3359`) wallet transf
 
 ---
 
-## 7. Progress
+## 7. Working rules for every delivery
+
+- **Deliver a zip** containing every modified and new file at its correct project path (even when only
+  documentation changed), so it can be dropped straight into the project.
+- **README "Migration" SQL block and its explanatory subsection** are updated in the same delivery that
+  introduces a table (deliveries 2, 3 and 5), following the existing style (`CREATE TABLE`, then
+  `ALTER TABLE ... ADD PRIMARY KEY / ADD KEY`, then `MODIFY id ... AUTO_INCREMENT`).
+- **`AGENTS.md` conventions** apply (documentation of what exists, no silent behavior changes).
+  `MULTICHAIN-HOLDINGS.md` is only edited when a verified fact changes or at delivery 6.
+- **PHP cannot be executed in the authoring sandbox**: each delivery ships its own
+  `bin/check-N-<name>.php` plus unit tests; the user runs them against real RPCs and pastes the output.
+- **Git Bash quirk**: run Node helper scripts as `node.exe script.js 2>&1 | tee out.txt` (the plain
+  `node` alias goes through `winpty` and fails with "stdin/stdout is not a tty" when piped).
+- **Never trust a remembered address, selector or event signature**: verify with `eth_getCode`,
+  `symbol()` or a known transaction, as the blueprint demands.
+- Tick the progress list below and note any deviation from this plan in the delivery's own entry.
+
+---
+
+## 8. Picking the work up in a new conversation
+
+Upload the current project zip (it must contain this file, `MULTICHAIN-HOLDINGS.md`, `AGENTS.md`,
+`README.md` and `src/`), say which delivery to build (the next unticked one in section 9), and
+mention that this plan is the reference. Everything decided and verified so far is in these files;
+nothing else has to be re-explained. The verification scripts used during pre-build testing
+(`eth-recheck.js`, `multichain-recheck.js`) are not part of the project; they are only needed if a
+reference value in section 5 has to be re-read.
+
+---
+
+## 9. Progress
 
 - [ ] Delivery 1 — Foundations
 - [ ] Delivery 2 — Date → block resolver
