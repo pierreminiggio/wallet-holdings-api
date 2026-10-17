@@ -577,7 +577,7 @@ Polygon's `defi.compound` is now a 2-entry array in the actual API response, not
 | Native genesis | ✅ Block 80,406,107 (Dec 16 2025, 22:18:19 UTC), tx-confirmed: 41.13 POL, single incoming deposit — notably only ~10 minutes before this wallet's first-ever outgoing Polygon transaction. |
 | Aave live position | ✅ Confirmed real via direct `getUserAccountData` read — see current-holdings table above. |
 | Aave/Compound historical events (Supply, Borrow) | ✅ Confirmed real and locatable **once the correct chunk size is used** — two independently-supplied real transaction hashes (a Borrow and a Supply) were successfully decoded and matched exactly the expected event signature (independently re-verified against Aave's real GitHub source and a block explorer's own decoded log, not just memory), exact Pool address, exact wallet address. The original "zero results" scan for this exact range was wrong due to the chunking/error-detection bug described at the top of this document — not a real anomaly. |
-| Token/event discovery, genesis (block 0) → native genesis (80,406,107) | 🔴 **Not completed** — this is Polygon's 2020-2021 low-fee era, where the real safe chunk size is only ~101 blocks; the adaptive scan script (section 3) was run against this range and, after covering only ~3% of it over roughly 15 hours, was projected to need **~20 days** to finish exhaustively. **Stopped as impractical for this process.** See "What's left to test" below for the recommended approach. |
+| Token/event discovery, genesis (block 0) → native genesis (80,406,107) | 🟡 **Scoped out (decision taken, see "What's left to test" item 4)** — this is Polygon's 2020-2021 low-fee era, where the real safe chunk size is only ~101 blocks; the adaptive scan script (section 3) was run against this range and, after covering only ~3% of it over roughly 15 hours, was projected to need **~20 days** to finish exhaustively. **Stopped as impractical for this process.** Polygon history is declared to start at native genesis; not scanned, by decision. |
 | Token/event discovery, native genesis (80,406,107) → current | ✅ **Fully closed.** Full-history scan completed both directions (incoming/outgoing), ~40 hours total wall-clock time using the corrected (empty-response-safe) scanner on Ankr — real measured throughput turned out roughly half of the initial short-sample estimate (~40hrs actual vs. ~21.5hrs projected), a useful reminder that short-sample throughput measurements can be optimistic for sustained long runs. **Zero unrecoverable errors.** Found 16 unique token contracts, including both debt tokens (`variableDebtPolUSDCn`, `variableDebtPolUSDT`) that a prior, buggy version of this same scan had silently missed — see the second critical finding at the top of this document for the full story of that bug and its fix. Cross-checked against the account owner's real live cache: every token in the cache's Polygon `tokens` list is present in this discovery result. |
 | Compound on Polygon | ✅ Closed — see current-holdings table; the "WBTC supply" transaction that originally seemed to be Aave was actually Compound (see section 5's lesson). |
 
@@ -850,7 +850,9 @@ need for a non-PHP dependency (none has, so far).
   free optimization once more than one wallet uses the feature (every wallet asking about the same
   chain/date shares one resolved block instead of re-bisecting).
 - **Token discovery**, per (wallet, chain): run `EvmLogScanner` for `Transfer` events touching the
-  wallet, from the chain's genesis (or a resumed cursor position) to the target block. Output is a
+  wallet, from the chain's configured history-start block (block 0 for every chain except Polygon,
+  whose history starts at native genesis 80,406,107 by decision, see "What's left to test" item 4)
+  or a resumed cursor position, to the target block. Output is a
   *candidate list of token contract addresses* only — never a running balance ledger (see the next
   point for why).
 - **Token balance reads**: for every discovered token, at the resolved historical block, a direct
@@ -998,8 +1000,27 @@ implementation starts, not an afterthought.
    errors, both previously-missed real tokens now present).
 3. ~~Polygon, native-genesis → current, log discovery~~ — **done**, see the Polygon section above
    (16 tokens found, zero errors, cross-validated against the real live cache).
-4. **Polygon, block 0 → native genesis, log discovery** — the ~20-day-at-current-rate problem. Needs
-   a scoping decision (see the three options already laid out below) before it can be called done.
+4. ~~Polygon, block 0 → native genesis, log discovery~~ — **scoped out (decision: option 1).** The
+   exhaustive scan was projected at ~20 days at the observed rate, so it needed a scoping decision
+   rather than a test. The three options considered:
+   1. **Declare history to start at native genesis, as a documented limitation — CHOSEN.** Polygon
+      history starts at block 80,406,107 (Dec 16 2025); the ~10.3M blocks after it are already fully
+      scanned. Zero cost. Known limitation: dates before that block return empty Polygon holdings, so
+      tokens merely *received* (airdrops, spam, unsolicited transfers) before native genesis are not
+      discovered. A wallet with no POL cannot pay gas, so before that block it could only have
+      received things, never acted on them (the wallet's first outgoing Polygon transaction came
+      ~10 minutes after native genesis).
+   2. **Run block 0 → genesis in the background on a paid RPC.** The only exhaustive option, but it
+      needs a paid plan (an explicit product decision), and the ~101-block cap near dense eras seems
+      to depend on log density, so a paid provider may not help as much as hoped. Not chosen.
+   3. **Find the earliest token activity cheaply first.** No known cheap method: nonce bisection finds
+      the first *outgoing* transaction, not incoming transfers. At best, the pre-genesis scan could
+      drop the outgoing-direction query (only incoming transfers can exist there), roughly halving
+      requests; this was not measured and would still take days. Not chosen.
+
+   **Design consequence:** the per-chain "history starts at" block must be a constant in the
+   reconstruction code (e.g. Polygon = 80,406,107), not an assumption baked into the scanner, so
+   option 2 can be enabled later for a specific wallet without rework.
 5. ~~Base token-balance correctness spot-check~~ — **done** for both 8LNDS and cbBTC (see the Base
    section above) — cbBTC's full 196-event history reconstructed cleanly with zero discrepancies.
 6. **BSC Aave historical trend across multiple dates** — config, live position, and discovery are all
