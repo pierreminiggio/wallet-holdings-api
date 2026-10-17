@@ -1039,10 +1039,21 @@ query builder has no `UPDATE`/upsert.
    never got the clean multi-date read-and-decode treatment the other chains' Aave positions did.
 8. **Polygon token-balance correctness spot-check** — never done at all for Polygon specifically (the
    NAFTY/TR3/8LNDS/cbBTC-style check that's been done on every other chain).
-9. **Re-verify Ethereum's Aave/Compound historical trend checks** with the corrected methodology —
-   these were direct point-reads (not chunked scans), so they're likely unaffected by the chunking
-   bug, but haven't been explicitly re-confirmed post-discovery the way the log-scan-based findings
-   were.
+9. ~~Re-verify Ethereum's Aave/Compound historical trend checks~~ — **done (Oct 17 2026).** Direct
+   point reads (no log scanning, so unaffected by the chunking bug) re-run on `eth.drpc.org` at the
+   last block before 12 monthly UTC dates (2025-11-01 → 2026-10-01) plus latest block 26,211,075,
+   with empty `eth_call` results treated as hard failures. Every contract address was verified
+   (`eth_getCode`, `symbol()`), and the Aave token addresses were resolved from the DataProvider.
+   - **Compound (Comet USDC): fully re-confirmed.** 2025-11-01: borrowed 933.435002 USDC against
+     0.4 WETH; 2025-12-01: borrowed 937.675240 USDC against 0.476818727900527526 WETH; from
+     2026-01-01 onward: no borrow, collateral dust of 0.000000000057157522 WETH, identical on every
+     date and at the latest block, and identical to the live figure recorded in `AGENTS.md`. Same
+     open → grow → wind down to dust story as the original 8-date run.
+   - **Aave: collateral side re-confirmed, debt side not exercised by these dates.** Only
+     2025-12-01 showed a position: 0.028014789715922191 aEthWETH, no USDC debt, account collateral
+     $84.14 (consistent with the aToken balance at an ETH price of about $3,000); all other sampled
+     dates and the latest block are zero. The monthly sample did not land on a date with USDC
+     variable debt, so the debt trend from the original 7-date run was not re-observed here.
 10. ~~BSC native genesis~~ — **done**: block 10,027,014 (Aug 14 2021, 16:58:37 UTC), tx-confirmed
     with an exact value match, see the BSC section above.
 11. ~~The async/background-execution design question~~ — **decided: no async/background-job
