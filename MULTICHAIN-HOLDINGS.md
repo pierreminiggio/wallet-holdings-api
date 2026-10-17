@@ -1009,7 +1009,10 @@ implementation starts, not an afterthought.
       tokens merely *received* (airdrops, spam, unsolicited transfers) before native genesis are not
       discovered. A wallet with no POL cannot pay gas, so before that block it could only have
       received things, never acted on them (the wallet's first outgoing Polygon transaction came
-      ~10 minutes after native genesis).
+      ~10 minutes after native genesis). **Verified:** `eth_getTransactionCount` at block 80,406,106
+      (`0x4cae65a`, the block just before native genesis) returns `0x0` on `polygon.drpc.org`, so the
+      wallet provably sent no transaction before native genesis. The limitation is therefore exactly
+      "unsolicited incoming transfers only".
    2. **Run block 0 → genesis in the background on a paid RPC.** The only exhaustive option, but it
       needs a paid plan (an explicit product decision), and the ~101-block cap near dense eras seems
       to depend on log density, so a paid provider may not help as much as hoped. Not chosen.
