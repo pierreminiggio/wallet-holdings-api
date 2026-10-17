@@ -842,9 +842,9 @@ need for a non-PHP dependency (none has, so far).
     it is a bug that was shipped, ran, and produced a wrong answer during this project's own testing.
   - **Never run two scans concurrently against the same (chain, provider) pair for the same reason** —
     confirmed directly that doing so roughly halves each scan's effective throughput (provider-side
-    rate limiting is shared across concurrent requests from the same key/IP, not per-request). The job
-    scheduler (see "Open design question" below) must serialize scans per provider, not just per
-    wallet.
+    rate limiting is shared across concurrent requests from the same key/IP, not per-request). Whatever
+    runs a scan (see "Execution model (decided)" below) must serialize scans per provider, not just
+    per wallet.
 - **A date→block resolver**, per chain, using the bisection approach from section 2. Cache the result
   **per (chain, date)**, not per (wallet, date) — the answer is wallet-independent, so this is a huge,
   free optimization once more than one wallet uses the feature (every wallet asking about the same
@@ -940,30 +940,36 @@ of the removed EVM reconstruction attempt) to trigger reconstruction on a cache 
 `/sui-holdings`'s existing 400 (before genesis) / 500 (cache inconsistency) / 502 (run failed) error
 shape, so the two multichain surfaces behave consistently to callers.
 
-**Open design question, not yet resolved**: unlike SUI's GitHub-Action-based async model, an
-in-process PHP reconstruction can't realistically block a single HTTP request for a scan that might
-take hours — and based on real, repeated measurement during this project's testing, "hours" is an
-understatement for the common case, not the worst case. Multiple full-history single-token scans on
-Base alone (a chain with one of the *better* real caps found) took **20-58 hours each** in practice,
-even after all known scanning bugs were fixed; a full wallet-wide multi-token scan will be
-substantially larger than any single-token scan measured so far. Concrete implications for whoever
-designs this:
-- A simple "cron runs once a minute, checks if the job finished" pattern is necessary but not
-  sufficient — the job needs to be **resumable across many, many invocations spanning multiple days**,
-  not just tolerant of one interruption. Store enough state (last-scanned block, current adaptive step
-  size, discovered-tokens-so-far) that a resume picks up exactly where a prior invocation left off,
-  with no wasted re-work and no risk of a gap at the resume boundary.
-- **Never schedule two reconstruction jobs against the same (chain, provider) pair concurrently** —
-  confirmed this roughly halves throughput for both. If multiple wallets need the same chain
-  reconstructed, queue them serially per provider, not in parallel.
-- Whoever owns this feature should set expectations accordingly: a "reconstruct my full history"
-  request for an active wallet on a chain with real transaction volume is a **multi-day background
-  job**, not a "check back in an hour" one, on current free-tier infrastructure. This may itself be
-  a reason to consider paid-tier RPC access for this specific feature even though `/holdings-now`
-  deliberately avoids it — worth an explicit product decision, not an assumption either way.
+**Execution model (decided): no background-job system.** A call to `/holdings` for a date on a
+cache miss does the work itself, mirroring `/sui-holdings`'s behavior as seen by the caller:
 
-This background-execution mechanism hasn't been designed yet and is a real gap to close before
-implementation starts, not an afterthought.
+- It resumes from the **most recent reconstructed point before the requested date** (the cursor), or
+  from the chain's history-start block if the wallet has none yet (block 0, except Polygon: native
+  genesis, see "What's left to test" item 4).
+- It walks forward **day by day** up to the requested date. **Every day it passes gets its own
+  `multichain_holdings_cache` row** (`source = 'reconstructed'`), not just the requested one, so a
+  later request anywhere in that range is a pure cache hit, never a second reconstruction.
+- It returns the holdings state for the requested day.
+- There is no job queue, no scheduler, no "job still running" response and no status endpoint.
+
+Resumability is still required, but as a safety property of the loop, not as an async mechanism:
+- Persist the cursor (last scanned block, current adaptive step size, tokens found so far) so that an
+  interrupted call (timeout, crash, provider failure) loses at most the day in progress, and the
+  next call resumes exactly where it stopped, with no gap at the resume boundary (the scanner never
+  advances past a block range whose calls did not succeed, section 3).
+- Advance the cursor's date **only after that day's cache rows are written**. A cursor that advances
+  without its rows is the exact bug found in production on the SUI side (see `AGENTS.md`).
+
+Measured constraint to keep in mind (not a reason to change the model): full-history single-token
+scans on Base took **20-58 hours each**, and a wallet-wide scan is larger. A first request for an old
+date on an active wallet can therefore run much longer than typical PHP, web-server or HTTP-client
+timeouts. Under this model such a call is simply cut off and the caller retries; every retry resumes
+from the cursor and makes progress, nothing is redone.
+
+Two scans must still **never run concurrently against the same (chain, provider) pair** (confirmed
+to roughly halve throughput for both). With no job scheduler, concurrent requests for the same
+wallet and chain need a lock; the mechanism is to be chosen at build time, given this codebase's
+query builder has no `UPDATE`/upsert.
 
 ---
 
@@ -1039,9 +1045,10 @@ implementation starts, not an afterthought.
    were.
 10. ~~BSC native genesis~~ — **done**: block 10,027,014 (Aug 14 2021, 16:58:37 UTC), tx-confirmed
     with an exact value match, see the BSC section above.
-11. **The async/background-execution design question** flagged in the architecture section above —
-    how a multi-hour scan runs without blocking an HTTP request. Needs an actual design, not just the
-    flag that it's unresolved.
+11. ~~The async/background-execution design question~~ — **decided: no async/background-job
+    system.** The request itself reconstructs from the cursor (or the chain's history-start block)
+    day by day up to the requested date, writing a cache row per day, and returns the requested
+    day. See "Execution model (decided)" in the architecture section.
 12. Only after the above: **build it** — the architecture section above is the blueprint; actual PHP
     implementation (log scanner, cursor repository, endpoint wiring, DB schema) hasn't been started.
 
