@@ -543,7 +543,7 @@ finding a faster provider).
 | Item | Status |
 |---|---|
 | Free RPC | ✅ **NodeReal (free signup)** — no working *keyless* option exists (tried and rejected: `drpc.org` rate-limited, `publicnode` archive-gated, official `bsc-dataseed` genuinely prunes old state (`"missing trie node"`), `1rpc.io`, `ankr` (needs key), `meowrpc`, `llamarpc`, `blockpi` down/unreachable). NodeReal confirmed reliable for archive reads and `eth_getLogs` at 49,999-block chunks. |
-| Native genesis | Not directly pinned down (wallet's BSC activity investigated was token-focused; native genesis not yet bisected — low priority, doesn't block anything currently understood). |
+| Native genesis | ✅ Block 10,027,014 (Aug 14 2021, 16:58:37 UTC), tx-confirmed (`0xbb08a05c66d1f7ec1c5e21feaa1de415b71baf20acd4a1b130f2425ddac2309b`): single incoming deposit of 0.0095 BNB from `0x161ba15a5f335c9f06bb5bbb0a9ce14076fbb645`, exact value match to the balance at that block (9,500,000,000,000,000 wei). Found via a coarse 500,000-block linear pass (window 10,000,000 → 10,500,000) then bisection, on NodeReal. Notably the same day, ~15 minutes after the wallet's Ethereum native genesis. |
 | Token discovery | ✅✅✅ **Fully re-run and now genuinely closed.** A complete fresh scan (block 0 → freshly-resolved current block, ~2,260 chunks, zero errors, notably fast given NodeReal's consistent reliability throughout this whole project) found **15 unique token contracts** — including both `aBnbWBNB` and `variableDebtBnbUSDC`, the two real tokens the earlier "zero failed chunks" scan had missed. Confirms the fix works and the prior result genuinely was incomplete, not a false alarm. |
 | Token balance correctness | ⚠️ **Key finding, now on solid footing**: NAFTY's current `balanceOf` (29,451.567...) does not match its Transfer history (28,363.005... from the one discovered transfer) — a ~3.84% unexplained increase, zero matching Transfer events, confirmed with full trustworthy coverage. Treat as a rebasing/reflection-style token; this is the finding behind "never trust summed deltas" in section 4. |
 | Aave | ✅ **Fixed** — Aave V3 *is* deployed on BSC (Pool: `0x6807dc923806fE8Fd134338EABCA509979a7e0cB`, DataProvider: `0xc90Df74A7c16245c5F5C5870327Ceb38Fe5d5328`, both from the canonical `aave-address-book` registry). This project's `AaveHoldingsClient::POOLS` previously had no BSC entry, meaning `/holdings-now` was under-reporting this wallet's BSC Aave position — **now added**, along with a `DEFAULT_RPC_URLS` entry for BSC (`https://bsc-rpc.publicnode.com`, confirmed working for `"latest"`-only reads, which is all `/holdings-now` needs). The full mechanism (`getAllReservesTokens` → per-reserve `getUserReserveData` → `getUserAccountData` summary) was tested end-to-end against the real wallet, producing a correct, schema-matching result cross-checked against Zerion's own raw token amounts in the cache (`aBnbWBNB`/`variableDebtBnbUSDC`), which agreed within the expected interest-accrual drift. |
@@ -1013,8 +1013,8 @@ implementation starts, not an afterthought.
    these were direct point-reads (not chunked scans), so they're likely unaffected by the chunking
    bug, but haven't been explicitly re-confirmed post-discovery the way the log-scan-based findings
    were.
-10. **BSC native genesis** — never actually pinned down (low priority, doesn't block anything
-    currently understood, but a real gap in an otherwise-closed chain).
+10. ~~BSC native genesis~~ — **done**: block 10,027,014 (Aug 14 2021, 16:58:37 UTC), tx-confirmed
+    with an exact value match, see the BSC section above.
 11. **The async/background-execution design question** flagged in the architecture section above —
     how a multi-hour scan runs without blocking an HTTP request. Needs an actual design, not just the
     flag that it's unresolved.
