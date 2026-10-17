@@ -1019,7 +1019,11 @@ query builder has no `UPDATE`/upsert.
       tokens merely *received* (airdrops, spam, unsolicited transfers) before native genesis are not
       discovered. A wallet with no POL cannot pay gas, so before that block it could only have
       received things, never acted on them (the wallet's first outgoing Polygon transaction came
-      ~10 minutes after native genesis). **Verified:** `eth_getTransactionCount` at block 80,406,106
+      ~10 minutes after native genesis). **Seen in practice (item 8 run):** native USDC (`0x3c499c54…3359`) already had a balance of 18.993040
+      at block 80,406,106, i.e. it was received before native genesis; it is still discovered
+      by the scan from native genesis because it was sent out at block 80,406,376 (~10 minutes later).
+      The limitation therefore only bites for tokens received before native genesis and never touched
+      again afterwards. **Verified:** `eth_getTransactionCount` at block 80,406,106
       (`0x4cae65a`, the block just before native genesis) returns `0x0` on `polygon.drpc.org`, so the
       wallet provably sent no transaction before native genesis. The limitation is therefore exactly
       "unsolicited incoming transfers only".
@@ -1069,15 +1073,40 @@ query builder has no `UPDATE`/upsert.
      2026-03-15), WBTC collateral accrues (0.00352745 on 2026-09-01); HF moves between 1.44 and 2.00
      with price. 2026-09-01: collateral $277.09, debt $113.54, HF 1.90.
    - 2026-10-01 and latest block: zero everywhere, so the position was closed between 2026-09-01 and
-     2026-10-01 (exact date not pinned). The "Aave collateral / debt / health factor" rows of the
+     2026-10-01. The item 8 run narrows this: the wallet's USDT0 transfers at blocks 93,167,662 –
+     93,167,973 (in 75.60, out 75.68, in 345.05, out 345.76) are consistent with repaying the Aave
+     USDT0 debt (75.64 on 2026-09-01) and the Compound USDT0 borrow (344.53 in the 2026-07-19 cache),
+     i.e. the positions were wound down within a ~300-block window around then, roughly 2.7 days
+     after the 2026-09-01 block at the measured ~57,600 blocks/day (an estimate, no block timestamp
+     was read). The "Aave collateral / debt / health factor" rows of the
      current-holdings table in the Polygon section are an older snapshot and no longer current.
    - Independent cross-check against the same saved live cache from 2026-07-19: WBTC supplied
      0.00352738, USDT0 variable debt 75.090104, USDC variable debt 37.656972 (account $227.24 / $112.69,
      HF 1.57) each fall between the 2026-07-01 and 2026-08-01 point reads (WBTC 0.00352735 →
      0.00352740; USDT0 74.860 → 75.242; USDC 37.545 → 37.732). This also dates the Polygon
      current-holdings table's Aave figures to about mid-July 2026.
-8. **Polygon token-balance correctness spot-check** — never done at all for Polygon specifically (the
-   NAFTY/TR3/8LNDS/cbBTC-style check that's been done on every other chain).
+8. ~~Polygon token-balance correctness spot-check~~ — **done (Oct 17 2026), with an explicit scope.**
+   Method (no log scanning, immune to the ~101-block log cap): for each token, find every block where
+   `balanceOf(wallet)` changes by bisecting point reads between the declared history start (block
+   80,406,106) and latest block 95,695,056, then compare each change with the Transfer events of
+   that single block. Token addresses were taken from the Aave reserve list on-chain (not typed by
+   hand): the plain ERC-20s this wallet used as borrow proceeds and collateral.
+   - **USDT0** (`0xc2132d05…8e8f`): 7 change points, all at blocks 93,167,662 – 93,167,973, every one
+     an exact match with its single Transfer event (+75.598753, +0.120354, -75.679396, +345.052550,
+     +0.801676, -345.761329, +0.000345). Residual balance at latest: 0.132953.
+   - **USDC, native** (`0x3c499c54…3359`): 10 change points between blocks 80,406,376 and
+     80,745,873, every one an exact match with its single Transfer event; balance 0 at latest.
+   - **Result: 17 of 17 change points reconcile exactly, 0 mismatches** — on both of the tokens that
+     could be exercised. No rebasing behavior seen.
+   - **Not exercised (inconclusive, NOT a pass):** WBTC, WETH, WPOL and bridged USDC (`0x2791bca1…`)
+     all read 0 at both ends of the range, and a bisection with equal endpoints never probes the
+     inside, so any in-and-out movement through the wallet (e.g. WBTC briefly held before being
+     supplied) is invisible to this method. The 12 other discovered Polygon token contracts (not in
+     the live cache) were not tested either, and neither were the Aave aTokens/debt tokens (their
+     balances change every block through interest, which item 7 covers separately).
+   - **Why this is enough to build on:** reconstruction reads `balanceOf` at each date and never sums
+     Transfer deltas (section 4), so a rebasing token among the untested ones would be read
+     correctly anyway; this check validated the Transfer-based discovery side on real tokens.
 9. ~~Re-verify Ethereum's Aave/Compound historical trend checks~~ — **done (Oct 17 2026).** Direct
    point reads (no log scanning, so unaffected by the chunking bug) re-run on `eth.drpc.org` at the
    last block before 12 monthly UTC dates (2025-11-01 → 2026-10-01) plus latest block 26,211,075,
