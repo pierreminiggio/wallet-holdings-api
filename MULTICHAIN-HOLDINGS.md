@@ -564,6 +564,10 @@ finding a faster provider).
 | Aave debt | $112.67 |
 | Aave health factor | 1.56 |
 
+**Note (Oct 17 2026): the table above is a point-in-time snapshot, not live.** Re-reading Aave on
+Polygon at the latest block now returns zero collateral and zero debt (see item 7); the other rows
+were not re-read.
+
 All values above are direct point reads (`eth_getBalance`/`eth_call` at `"latest"`), each
 independently verified — no log scanning involved, none of the caveats below apply to current-state
 tracking. The two Compound markets are genuinely separate, isolated positions (see section 5b) —
@@ -1032,11 +1036,36 @@ query builder has no `UPDATE`/upsert.
    option 2 can be enabled later for a specific wallet without rework.
 5. ~~Base token-balance correctness spot-check~~ — **done** for both 8LNDS and cbBTC (see the Base
    section above) — cbBTC's full 196-event history reconstructed cleanly with zero discrepancies.
-6. **BSC Aave historical trend across multiple dates** — config, live position, and discovery are all
-   proven; only current-state has been checked, not a decoded trend across dates the way
-   Ethereum/Polygon/Base got.
-7. **Polygon Aave — a proper multi-date decoded trend** — real events are tx-confirmed to exist, but
-   never got the clean multi-date read-and-decode treatment the other chains' Aave positions did.
+6. ~~BSC Aave historical trend across multiple dates~~ — **done (Oct 17 2026).** Direct `balanceOf`
+   on the aToken and variable-debt token of all 8 BSC reserves (resolved from the DataProvider at
+   `latest`, NodeReal archive) plus `getUserAccountData`, at the last block before 22 monthly UTC
+   dates (2025-01-01 → 2026-10-01) and at latest block 128,181,904. No failed reads, and the
+   account-level USD totals agree with the token balances at every date.
+   - Zero on every date through 2025-10-01. First observed 2025-11-01: 0.170012507196328142 WBNB
+     collateral against 60.118707 USDC debt (account $185.09 / $60.11, HF 2.31).
+   - Coherent trend: WBNB collateral and USDC debt drift up slowly with interest (Dec 1: 0.170038 /
+     60.34; Jan 1: 0.170048 / 60.56); on 2026-02-01 more was borrowed (USDC debt 80.79, WBNB
+     0.180054, HF 1.30); by 2026-03-01 debt was reduced to 44.70 with WBNB 0.191057; then slow
+     interest accrual to 2026-09-01 (WBNB 0.191080, USDC debt 45.44, HF 2.18).
+   - 2026-10-01 and latest block: zero everywhere (account data and all 16 tokens), so the position
+     was closed between 2026-09-01 and 2026-10-01 (exact date not pinned). The opening date within
+     October 2025 is likewise not pinned.
+7. ~~Polygon Aave — a proper multi-date decoded trend~~ — **done (Oct 17 2026).** Same method as
+   item 6 on `polygon.drpc.org`: all 21 Polygon reserves (note: two reserves share the symbol
+   `USDC`, native and bridged; the output does not distinguish them), 17 UTC dates (2025-12-20 →
+   2026-10-01, roughly biweekly) plus latest block 95,693,425. No failed reads, and account-level USD
+   totals agree with the token balances at every date.
+   - 2025-12-20: zero everywhere (consistent with native genesis on Dec 16 2025).
+   - 2026-01-01: WBTC collateral 0.00340861, debt WPOL 562.14 + USDC 90.02 (account $298.29 /
+     $146.39, HF 1.59). 2026-01-15: WPOL debt 1,001.81, USDC debt 26.63 (HF 1.41). 2026-02-01: WBTC
+     0.00352708, WPOL 536.02, USDC 41.71, plus new USDT0 debt 73.03 (HF 1.27). 2026-02-15: WPOL debt
+     gone, USDT0 73.18 + USDC 41.79 (HF 1.67).
+   - From there: USDT0 and USDC debt accrue slowly (USDC debt reduced from 41.87 to 36.92 on
+     2026-03-15), WBTC collateral accrues (0.00352745 on 2026-09-01); HF moves between 1.44 and 2.00
+     with price. 2026-09-01: collateral $277.09, debt $113.54, HF 1.90.
+   - 2026-10-01 and latest block: zero everywhere, so the position was closed between 2026-09-01 and
+     2026-10-01 (exact date not pinned). The "Aave collateral / debt / health factor" rows of the
+     current-holdings table in the Polygon section are an older snapshot and no longer current.
 8. **Polygon token-balance correctness spot-check** — never done at all for Polygon specifically (the
    NAFTY/TR3/8LNDS/cbBTC-style check that's been done on every other chain).
 9. ~~Re-verify Ethereum's Aave/Compound historical trend checks~~ — **done (Oct 17 2026).** Direct
