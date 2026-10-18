@@ -158,6 +158,38 @@ If historical reconstruction is revisited later with a different approach, `AGEN
 concise summary of the specific, hard-won lessons from this attempt (the Blockscout indexing-
 status bug in particular) worth not re-learning from scratch.
 
+## Multichain historical reconstruction (in progress)
+
+`/holdings/{address}?date=` is still a pure cache lookup. Its reconstruction for Ethereum, Base,
+Polygon and BSC is being built delivery by delivery from `MULTICHAIN-RECONSTRUCTION-PLAN.md`
+(the plan is the source of truth; `/holdings` behavior does not change until delivery 6).
+
+**Delivery 1 (foundations) is in place, with no behavior change for existing endpoints:**
+
+- `EvmRpcClient` takes an optional block on `ethCall` (default `latest`, unchanged) and gained
+  `getBalance`, `getLogs`, `blockNumber`, `getBlockByNumber`, `getCode`/`hasCodeAt`. Responses
+  are validated strictly (empty, malformed or key-less bodies are failures, never empty
+  successes; a historical `eth_call` returning `0x` is an error, never a zero). Failures are
+  classified (`EvmRpcError`: transient / range cap / auth); only transient ones are retried, and
+  only if the caller asks (default: no retry, as before).
+- `CompoundHoldingsClient::getHoldings($address, $block)` and
+  `AaveHoldingsClient::getHoldings($address, $block)` accept a block. Historical Aave reads use
+  `balanceOf` on aTokens/debt tokens (addresses resolved once at `latest`), never the
+  DataProvider convenience method; `usedAsCollateral` is `null` in that mode (unknown).
+  A contract that does not exist yet at the block (checked with `eth_getCode`) is a genuine zero.
+- `EvmReconstructionChains` (history start blocks, skipped blocks, unsupported chain keys) and
+  `EvmReconstructionConfig` (providers per chain, lock directory).
+- New optional `reconstruction` section in `config.php` (see `config.example.php`): archive-capable
+  RPC providers per chain and the lock directory. Ethereum/Base/Polygon have keyless drpc.org
+  defaults; **BSC needs a (free) NodeReal URL**. No database change in this delivery.
+
+Checks (PHP 8.0+, no composer needed for the tests):
+
+```
+php tests/run.php            # offline unit tests (also passes with: php -n tests/run.php)
+php bin/check-1-reads.php    # acceptance against real RPCs, paste the output back
+```
+
 ## Setup
 
 1. `composer install`

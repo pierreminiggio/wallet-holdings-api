@@ -17,6 +17,13 @@ discovery methods, token-balance correctness pitfalls, Compound/Aave historical 
 constraints) and, just as importantly, what's still unresolved. Per that document's own rule:
 no implementation work starts until it has no unresolved items left.
 
+**Build status:** the pre-build items are closed and the build follows
+`MULTICHAIN-RECONSTRUCTION-PLAN.md` (single source of truth, see its section 9 for which
+deliveries have shipped). Delivery 1 added a block parameter to `EvmRpcClient::ethCall` and to the
+Compound/Aave clients; for `"latest"` they behave exactly as described in Part 2. Two rules from it
+worth knowing before touching those files: `new EvmRpcClient()` per call defeats the `eth_getCode`
+memo (the clients reuse one per URL on purpose), and a historical `"0x"` is never to be read as zero.
+
 ---
 
 # Part 1 — SUI holdings

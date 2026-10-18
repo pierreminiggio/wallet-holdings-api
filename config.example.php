@@ -41,5 +41,35 @@ return [
         'polygon' => 'https://polygon-bor-rpc.publicnode.com',
         'arbitrum' => 'https://arbitrum-one-rpc.publicnode.com',
         'optimism' => 'https://optimism-rpc.publicnode.com'
+    ],
+    'reconstruction' => [
+        // Used only by the multichain historical reconstruction (work in progress, see
+        // MULTICHAIN-RECONSTRUCTION-PLAN.md). Kept apart from 'rpc' above on purpose: that
+        // section only needs "latest" reads, while reconstruction needs archive access and
+        // eth_getLogs, which is chain-specific (see MULTICHAIN-HOLDINGS.md, "RPC endpoints
+        // used"). Per chain: a list of providers in priority order (first = primary, the
+        // others are fallbacks); each is {name, url}, or just a URL string (the name is then
+        // derived from the host). Provider names must match [a-z0-9][a-z0-9_-]* because
+        // they end up in lock file names. Configuring a chain REPLACES its defaults.
+        //
+        // This whole section can be omitted: App-level defaults (EvmReconstructionConfig::
+        // DEFAULT_PROVIDERS) cover Ethereum, Base and Polygon with keyless drpc.org
+        // endpoints. BSC has NO keyless archive provider: add a free NodeReal key below, or
+        // BSC cannot be reconstructed.
+        'rpc' => [
+            'binance-smart-chain' => [
+                ['name' => 'nodereal', 'url' => 'https://bsc-mainnet.nodereal.io/v1/YOUR_KEY']
+            ],
+            // Optional, e.g. a second Ethereum provider (NodeReal's real eth_getLogs cap is
+            // ~49,999 blocks, against ~101 on drpc.org, so it is much faster for the scan):
+            // 'ethereum' => [
+            //     ['name' => 'nodereal', 'url' => 'https://eth-mainnet.nodereal.io/v1/YOUR_KEY'],
+            //     ['name' => 'drpc', 'url' => 'https://eth.drpc.org']
+            // ],
+        ],
+        // Directory for the per-(chain, provider) lock files. Must be writable by the web
+        // server user and NOT inside the web root. Optional: defaults to a
+        // 'wallet-holdings-api-locks' directory under the system temp dir.
+        'lock_directory' => ''
     ]
 ];

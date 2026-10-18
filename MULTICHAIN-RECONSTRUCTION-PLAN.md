@@ -6,7 +6,7 @@ and record deviations here. The blueprint and every verified finding it relies o
 [`MULTICHAIN-HOLDINGS.md`](MULTICHAIN-HOLDINGS.md) (all pre-build items there are closed or
 explicitly scoped out); project conventions live in [`AGENTS.md`](AGENTS.md).
 
-Status: **plan complete and all decisions confirmed (Oct 17 2026); implementation not started.**
+Status: **plan complete and all decisions confirmed (Oct 17 2026); delivery 1 shipped (Oct 18 2026), next: delivery 2.**
 The build happens in later conversations, one delivery at a time, starting with delivery 1 (see
 section 8 for how to pick the work up).
 
@@ -364,9 +364,29 @@ reference value in section 5 has to be re-read.
 
 ## 9. Progress
 
-- [ ] Delivery 1 — Foundations
+- [x] Delivery 1 — Foundations (see its deviations below)
 - [ ] Delivery 2 — Date → block resolver
 - [ ] Delivery 3 — `EvmLogScanner`
 - [ ] Delivery 4 — Snapshot builder
 - [ ] Delivery 5 — Cursor, lock, reconstruction service
 - [ ] Delivery 6 — Endpoint wiring, docs, end-to-end
+
+### Delivery 1 — notes and deviations
+
+- PHP 8.3 *was* installable in the authoring sandbox this time, so the unit tests were actually
+  run (56 tests, also with `php -n`). Only the real-RPC acceptance (`bin/check-1-reads.php`) still
+  has to be run locally: the sandbox has no access to RPC providers.
+- **Added, not in the plan: `EvmRpcClient::hasCodeAt()` (`eth_getCode`, memoized).** Without it the
+  rule "historical `0x` is an error" would make every day before a Comet market / Aave token exists
+  fail. Absence is now proven by `eth_getCode`, never inferred from an empty call.
+- **Aave historical `usedAsCollateral` is `null`**: its only source is `getUserReserveData`, which is
+  unreliable historically. Delivery 4 can decide whether that is acceptable or whether to add
+  `Pool.getUserConfiguration` (selector and bit layout to be verified first).
+- `EvmRpcError` classes also treat "missing trie node" / "header not found" (non-archive node) as
+  *auth* (provider unusable for the call), and "invalid params" as *auth*, per the blueprint.
+- Per-chain constants live in `EvmReconstructionChains`; config in `EvmReconstructionConfig`
+  (providers are `{name, url}` lists, the name is used for the lock file). BSC has no keyless default.
+- Compound/Aave clients keep one `EvmRpcClient` per URL so the `eth_getCode` memo and the Aave reserve
+  list are paid once per walk. The clients return only `upstream_error` strings for failures; the
+  error class is available via the injected client's `getLastError()` if delivery 4 needs it.
+- Tests: `tests/run.php` (no PHPUnit, no vendor).

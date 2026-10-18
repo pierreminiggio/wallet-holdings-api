@@ -78,11 +78,37 @@ class CompoundHoldingsClient
      * @param array<string, string> $rpcUrls Chain key (e.g. "ethereum") => RPC URL.
      *                                        Chains without an entry here are skipped.
      */
-    public function __construct(private array $rpcUrls)
+    public function __construct(private array $rpcUrls, private ?\Closure $rpcFactory = null)
     {
     }
 
     /**
+     * Builds the RPC client for one chain. $rpcFactory (fn(string $url): EvmRpcClient) lets
+     * the historical reconstruction supply clients configured with retries, and lets tests
+     * supply clients wired to a fake transport; the default is a plain client, which is
+     * exactly what /holdings-now has always used.
+     */
+    private function makeRpc(string $url): EvmRpcClient
+    {
+        // One client per URL for the life of this instance: its eth_getCode memo
+        // (EvmRpcClient::hasCodeAt) must survive from one historical read to the next, or a
+        // day-by-day walk would pay for an eth_getCode per contract per day.
+        return $this->rpcClients[$url] ??= $this->rpcFactory !== null
+            ? ($this->rpcFactory)($url)
+            : new EvmRpcClient($url);
+    }
+
+    /** @var array<string, EvmRpcClient> */
+    private array $rpcClients = [];
+
+    /**
+     * @param int|string $block "latest" (default: what /holdings-now reads) or a block number
+     *                          for a historical read. In historical mode a market whose
+     *                          contract does not exist yet at that block is a genuine "no
+     *                          position" (verified with eth_getCode, never inferred from an
+     *                          empty eth_call), and every other read must return real data
+     *                          or the market lands in "errors".
+     *
      * @return array{positions: array<string, list<array>>, errors: array<string, string>}
      *         "positions" maps chain => list of this wallet's non-zero positions on
      *         that chain (one entry per market with an actual position; a chain with
@@ -93,7 +119,7 @@ class CompoundHoldingsClient
      *         shouldn't be indistinguishable from another's, or silently block markets
      *         on the same chain that succeeded.
      */
-    public function getHoldings(string $address): array
+    public function getHoldings(string $address, int|string $block = 'latest'): array
     {
         $positions = [];
         $errors = [];
@@ -103,10 +129,10 @@ class CompoundHoldingsClient
                 continue;
             }
 
-            $rpc = new EvmRpcClient($this->rpcUrls[$chain]);
+            $rpc = $this->makeRpc($this->rpcUrls[$chain]);
 
             foreach ($markets as $market) {
-                $result = $this->getMarketPosition($rpc, $address, $market['comet']);
+                $result = $this->getMarketPosition($rpc, $address, $market['comet'], $block);
 
                 if (is_string($result)) {
                     $errors["{$chain}/{$market['base']}"] = $result;
@@ -142,11 +168,30 @@ class CompoundHoldingsClient
      *         Array on success (raw + formatted decimal-string amounts), or an
      *         EvmRpcClient::ERROR_* constant on RPC failure.
      */
-    private function getMarketPosition(EvmRpcClient $rpc, string $wallet, string $comet): array|string
+    private function getMarketPosition(EvmRpcClient $rpc, string $wallet, string $comet, int|string $block): array|string
     {
         $walletEnc = AbiCodec::encodeAddress($wallet);
 
-        $decimalsRaw = $rpc->ethCall($comet, self::SEL_DECIMALS);
+        if ($block !== 'latest') {
+            $deployed = $rpc->hasCodeAt($comet, (int) $block);
+
+            if ($deployed instanceof EvmRpcError) {
+                return EvmRpcClient::ERROR_UPSTREAM;
+            }
+
+            if (! $deployed) {
+                // The market did not exist yet: a real, verified zero position.
+                return [
+                    'supplied' => '0',
+                    'suppliedFormatted' => '0',
+                    'borrowed' => '0',
+                    'borrowedFormatted' => '0',
+                    'collateral' => [],
+                ];
+            }
+        }
+
+        $decimalsRaw = $rpc->ethCall($comet, self::SEL_DECIMALS, $block);
 
         if ($decimalsRaw === EvmRpcClient::ERROR_UPSTREAM) {
             return EvmRpcClient::ERROR_UPSTREAM;
@@ -154,9 +199,9 @@ class CompoundHoldingsClient
 
         $baseDecimals = hexdec(AbiCodec::strip0x($decimalsRaw));
 
-        $suppliedRaw = $rpc->ethCall($comet, self::SEL_BALANCE_OF . $walletEnc);
-        $borrowedRaw = $rpc->ethCall($comet, self::SEL_BORROW_BALANCE_OF . $walletEnc);
-        $numAssetsRaw = $rpc->ethCall($comet, self::SEL_NUM_ASSETS);
+        $suppliedRaw = $rpc->ethCall($comet, self::SEL_BALANCE_OF . $walletEnc, $block);
+        $borrowedRaw = $rpc->ethCall($comet, self::SEL_BORROW_BALANCE_OF . $walletEnc, $block);
+        $numAssetsRaw = $rpc->ethCall($comet, self::SEL_NUM_ASSETS, $block);
 
         if (
             $suppliedRaw === EvmRpcClient::ERROR_UPSTREAM
@@ -173,7 +218,7 @@ class CompoundHoldingsClient
         $collateral = [];
 
         for ($i = 0; $i < $numAssets; $i++) {
-            $infoResult = $rpc->ethCall($comet, self::SEL_GET_ASSET_INFO . AbiCodec::encodeUint($i));
+            $infoResult = $rpc->ethCall($comet, self::SEL_GET_ASSET_INFO . AbiCodec::encodeUint($i), $block);
 
             if ($infoResult === EvmRpcClient::ERROR_UPSTREAM) {
                 return EvmRpcClient::ERROR_UPSTREAM;
@@ -185,7 +230,8 @@ class CompoundHoldingsClient
 
             $collResult = $rpc->ethCall(
                 $comet,
-                self::SEL_USER_COLLATERAL . $walletEnc . AbiCodec::encodeAddress($assetAddr)
+                self::SEL_USER_COLLATERAL . $walletEnc . AbiCodec::encodeAddress($assetAddr),
+                $block
             );
 
             if ($collResult === EvmRpcClient::ERROR_UPSTREAM) {
@@ -199,8 +245,8 @@ class CompoundHoldingsClient
                 continue;
             }
 
-            $tokenDecimalsRaw = $rpc->ethCall($assetAddr, self::SEL_DECIMALS);
-            $symbolRaw = $rpc->ethCall($assetAddr, self::SEL_SYMBOL);
+            $tokenDecimalsRaw = $rpc->ethCall($assetAddr, self::SEL_DECIMALS, $block);
+            $symbolRaw = $rpc->ethCall($assetAddr, self::SEL_SYMBOL, $block);
 
             if ($tokenDecimalsRaw === EvmRpcClient::ERROR_UPSTREAM || $symbolRaw === EvmRpcClient::ERROR_UPSTREAM) {
                 return EvmRpcClient::ERROR_UPSTREAM;
