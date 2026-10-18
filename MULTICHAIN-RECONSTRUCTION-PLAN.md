@@ -390,3 +390,8 @@ reference value in section 5 has to be re-read.
   list are paid once per walk. The clients return only `upstream_error` strings for failures; the
   error class is available via the injected client's `getLastError()` if delivery 4 needs it.
 - Tests: `tests/run.php` (no PHPUnit, no vendor).
+- `bin/check-1-reads.php` applies the blueprint's retry policy itself: transient errors are retried on the
+  same input with exponential backoff (per call, then per check in rounds across all configured providers),
+  an auth error drops that provider for the check, a data mismatch is never retried, and a check that stays
+  unreachable is reported as INFRASTRUCTURE, distinct from a wrong value. Date-to-block discovery
+  (bisection, its own retry handling) belongs to delivery 2.
