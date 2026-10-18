@@ -183,6 +183,13 @@ $tokenCheck('polygon-native-usdc-mid-window', 80636107, NATIVE_USDC, '60');
 $tokenCheck('polygon-native-usdc-just-before-exit', 80745841, NATIVE_USDC, '61.046');
 $tokenCheck('polygon-native-usdc-gone-after-window', 80745873, NATIVE_USDC, null);
 
+// A transfer pair the scanner found (+243.550038 at 80,526,467, -243.550038 at 80,526,491) that the section 5 list of 10
+// transfers did not contain. It nets to zero, so balance reconciliation could never have shown it. balanceOf is the ground truth:
+$tokenCheck('polygon-native-usdc-before-extra-pair', 80526466, NATIVE_USDC, null);
+$tokenCheck('polygon-native-usdc-inside-extra-pair-start', 80526467, NATIVE_USDC, '243.550038');
+$tokenCheck('polygon-native-usdc-inside-extra-pair-end', 80526490, NATIVE_USDC, '243.550038');
+$tokenCheck('polygon-native-usdc-after-extra-pair', 80526491, NATIVE_USDC, null);
+
 $checks[] = [
     'id' => 'eth-compound-2025-10-31-end', 'chain' => 'ethereum', 'block' => 23700766, 'tokens' => [], 'nonZero' => true,
     'assert' => static function (array $h): array {
@@ -244,21 +251,26 @@ $checks[] = [
     },
 ];
 
+// The reference "all zero" values are about Aave only (the wallet DOES have Compound positions on Polygon), so
+// only Aave is asserted here, and the Compound result is printed for information.
 foreach ([['bsc-aave-all-zero', 'binance-smart-chain', 125000754], ['polygon-aave-all-zero', 'polygon', 94738439]] as [$id, $chain, $block]) {
     $checks[] = [
         'id' => $id, 'chain' => $chain, 'block' => $block, 'tokens' => [], 'nonZero' => false,
-        'assert' => static fn (array $h): array => ($h['defi']['aave'] === null && $h['defi']['compound'] === []) ? [] : ['expected no Aave/Compound position'],
+        'info' => static fn (array $h): string => $h['defi']['compound'] === [] ? '' : '  [Compound, not asserted: ' . count($h['defi']['compound']) . ' market(s) with a position]',
+        'assert' => static fn (array $h): array => $h['defi']['aave'] === null ? [] : ['expected no Aave position, got ' . json_encode($h['defi']['aave'])],
     ];
 }
 
 // Native balance at each chain's native genesis: zero one block earlier, non-zero at it.
 foreach ([['ethereum', 13024431, 'ETH'], ['binance-smart-chain', 10027014, 'BNB'], ['polygon', 80406107, 'POL'], ['base', 35321858, 'ETH']] as [$chain, $genesis, $symbol]) {
     $checks[] = [
+        // The pair (zero one block before, non-zero at genesis) is its own control: the same assertion fails on the
+        // other side of the boundary. A burn address would NOT make a valid wrong-wallet control: it holds funds.
         'id' => "{$chain}-native-genesis-minus-1", 'chain' => $chain, 'block' => $genesis - 1, 'tokens' => [], 'nonZero' => false,
         'assert' => static fn (array $h): array => $h['native'] === null ? [] : ["native balance before genesis should be zero, got {$h['native']['amount']}"],
     ];
     $checks[] = [
-        'id' => "{$chain}-native-genesis", 'chain' => $chain, 'block' => $genesis, 'tokens' => [], 'nonZero' => true,
+        'id' => "{$chain}-native-genesis", 'chain' => $chain, 'block' => $genesis, 'tokens' => [], 'nonZero' => false,
         'assert' => static fn (array $h): array => ($h['native'] !== null && $h['native']['symbol'] === $symbol && norm($h['native']['amount']) !== '0') ? [] : ['expected a non-zero ' . $symbol . ' balance at the native genesis block, got ' . json_encode($h['native'])],
     ];
 }
@@ -289,7 +301,7 @@ foreach ($checks as $check) {
     $problems = array_values(($check['assert'])($holdings));
 
     if ($problems === []) {
-        echo "PASS  {$label}" . ($skipped !== [] ? '  [skipped tokens: ' . count($skipped) . ']' : '') . "\n";
+        echo "PASS  {$label}" . ($skipped !== [] ? '  [skipped tokens: ' . count($skipped) . ']' : '') . (isset($check['info']) ? ($check['info'])($holdings) : '') . "\n";
     } else {
         $failures++;
         echo "FAIL  {$label}\n";

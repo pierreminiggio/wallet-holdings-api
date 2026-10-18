@@ -454,3 +454,15 @@ reference value in section 5 has to be re-read.
 - `bin/check-4-snapshot.php`: USDT0 residual and the balances between its 7 transfers, native USDC held only in a past
   window, Compound (Ethereum), Aave (Ethereum, BSC, Polygon), the zero cases, native balance at each chain's genesis
   (zero one block before, non-zero at it), negative controls.
+
+### Findings from the first real runs of checks 3 (long) and 4
+
+- **Section 5 list of native-USDC transfers is incomplete.** The scanner finds 12 transfers in Polygon blocks
+  80,406,376 to 80,745,873, not 10: an extra pair `+243.550038` at 80,526,467 and `-243.550038` at 80,526,491. It nets
+  to zero, which is why the earlier balance reconciliation never showed it. Check 3 now expects the 12, and check 4 asserts
+  `balanceOf` around the pair (0, 243.550038, 243.550038, 0): **pending the user's run**, that is what confirms the extra
+  pair is real and not a scanner artefact. (If it fails, the scanner is wrong, not the list.)
+- **"Polygon Aave all zero" means Aave only**: the wallet has Compound positions on Polygon at 94,738,439. Check 4 had
+  asserted both; it now asserts Aave only and prints the Compound count.
+- Native genesis pairs are self-controlling (zero one block before, non-zero at genesis); a burn address is not a valid
+  wrong-wallet control because it holds funds, so the wrong-wallet control no longer applies to them.

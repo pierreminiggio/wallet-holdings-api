@@ -6,7 +6,7 @@
  *
  *   - Polygon blocks 93,167,662 -> 93,167,973 must yield exactly the 7 USDT0 transfers listed;
  *   - Polygon blocks 80,406,376 -> 80,745,873 (340k blocks, slow on a keyless provider: use --long)
- *     must yield exactly the 10 native-USDC transfers listed;
+ *     must yield the 10 native-USDC transfers listed in the plan plus one zero-net pair (12 in all);
  *   - the same window scanned in two resumed halves gives the same logs (no hole at the boundary);
  *   - a wrong wallet does NOT produce those transfers (the check is discriminating);
  *   - Base blocks around the hardcoded skipped blocks complete without ever requesting them.
@@ -206,6 +206,9 @@ $usdcExpected = expectedTransfers([
     [80406376, -17.990703], [80511190, 53.709343], [80511229, -54.611680], [80512567, 160.964707],
     [80512690, -161.064707], [80636033, 235.168996], [80636107, -175.168996], [80636216, -58.955012],
     [80745841, 60.001012], [80745873, -61.046000],
+    // Not in the section 5 list of 10, found by the scanner: a pair that nets to zero (so balance reconciliation could
+    // never reveal it). bin/check-4-snapshot.php asserts the balanceOf values around it (0 -> 243.550038 -> 0).
+    [80526467, 243.550038], [80526491, -243.550038],
 ]);
 
 $only = $options['only'] ?? null;
@@ -305,7 +308,7 @@ if ($wanted('base-skipped-blocks-never-requested')) {
 }
 
 // ---- Polygon native USDC, 10 transfers (long) ---------------------------------------------------------
-if (isset($options['long']) || $only === 'polygon-native-usdc-10-transfers') {
+if (isset($options['long']) || $only === 'polygon-native-usdc-12-transfers') {
     sleep($pauseSeconds);
     echo "        (long check: 340k Polygon blocks, expect many minutes on a keyless provider)\n";
     [$state, $logs, $gaps, $infra] = scanWindow('polygon', providerClients('polygon', $options, $reconstruction, $retries), $wallet, 80406376, 80745873, $rounds, $roundDelay);
@@ -314,9 +317,9 @@ if (isset($options['long']) || $only === 'polygon-native-usdc-10-transfers') {
         ? ['native USDC transfers differ', '  expected: ' . implode(' ', $usdcExpected), '  actual:   ' . implode(' ', $actual)]
         : [];
 
-    $report('polygon-native-usdc-10-transfers', $problems, $infra, $gaps, count($actual) . ' native USDC transfers, tokens found: ' . count($state->tokens()));
+    $report('polygon-native-usdc-12-transfers', $problems, $infra, $gaps, count($actual) . ' native USDC transfers, tokens found: ' . count($state->tokens()));
 } elseif ($only === null) {
-    echo "SKIP  polygon-native-usdc-10-transfers (340k blocks, slow): run with --long\n";
+    echo "SKIP  polygon-native-usdc-12-transfers (340k blocks, slow): run with --long\n";
 }
 
 echo $failures === 0 ? "\nALL OK\n" : "\n{$failures} check(s) failed\n";
