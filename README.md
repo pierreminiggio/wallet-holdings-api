@@ -183,11 +183,21 @@ Polygon and BSC is being built delivery by delivery from `MULTICHAIN-RECONSTRUCT
   RPC providers per chain and the lock directory. Ethereum/Base/Polygon have keyless drpc.org
   defaults; **BSC needs a (free) NodeReal URL**. No database change in this delivery.
 
+**Delivery 2 (date to block) is in place:** `EvmBlockResolver` finds a day's end block by searching block
+timestamps (interpolation and bisection steps alternating, so a few reads on regular chains and at most
+about twice a bisection on irregular ones), bounded below by the chain's history start, over the chain's
+providers in priority order (a provider failing or lagging is skipped; the head used is the highest any
+provider reports). It returns one of four outcomes (`EvmBlockResolution`): resolved, before history
+start, day not complete, error. `EvmBlockByDateRepository` caches resolved days in the new
+`evm_block_by_date` table, see the migration block below (**run it before delivery 5 needs it; nothing
+reads it yet**).
+
 Checks (PHP 8.0+, no composer needed for the tests):
 
 ```
 php tests/run.php            # offline unit tests (also passes with: php -n tests/run.php)
-php bin/check-1-reads.php    # acceptance against real RPCs, paste the output back
+php bin/check-1-reads.php    # delivery 1 acceptance against real RPCs, paste the output back
+php bin/check-2-blocks.php   # delivery 2 acceptance (reference blocks), same
 ```
 
 ## Setup
@@ -309,6 +319,23 @@ ALTER TABLE `multichain_holdings_cache`
 
 ALTER TABLE `multichain_holdings_cache`
   ADD KEY `address_as_of_date` (`address`, `as_of_date`);
+
+-- Date-to-block cache for the multichain historical reconstruction (delivery 2). Per (chain, day),
+-- NOT per wallet: every wallet shares it. Only completed days are ever stored.
+CREATE TABLE `evm_block_by_date` (
+  `id` bigint(20) NOT NULL,
+  `chain` varchar(32) NOT NULL,
+  `day_date` date NOT NULL,
+  `end_block` bigint(20) NOT NULL,
+  `resolved_at` bigint(20) NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+ALTER TABLE `evm_block_by_date`
+  ADD PRIMARY KEY (`id`),
+  ADD KEY `chain_day_date` (`chain`, `day_date`);
+
+ALTER TABLE `evm_block_by_date`
+  MODIFY `id` bigint(20) NOT NULL AUTO_INCREMENT;
 ```
 
 `multichain_holdings_cache` caches the *entire* `/holdings-now/{address}` response body
@@ -336,6 +363,18 @@ the previous one, so a history of past snapshots builds up per address instead o
 ever keeping the latest. `cached_at` is a Unix timestamp (consistent with the other
 timestamp columns in this schema) rather than a `DATETIME`, so freshness (the 2-hour
 cache window) is a plain integer comparison in PHP.
+
+### Date-to-block cache: `evm_block_by_date`
+
+`evm_block_by_date` maps `(chain, day_date)` to `end_block`: the last block whose timestamp is strictly
+before `day_date + 1 day 00:00:00 UTC`, i.e. the block the end-of-day snapshot of that day is taken at.
+It is **per chain and day, not per wallet**: the answer is wallet-independent, so every wallet asking
+about the same chain and date shares one row instead of re-searching. `EvmBlockByDateRepository`
+(`find()` / `store()`) is append-only like the rest of this schema; two racing requests can insert the
+same row twice with the same value, which is harmless, so `find()` takes any. Only **completed** days are
+stored: `EvmBlockResolver` returns `DAY_NOT_COMPLETE` for today or a future date (the chain head has not
+reached the end of that day) and never stores it; `BEFORE_START` (a day before the chain's history-start
+block) and provider failures are not stored either.
 
 ### Historical reconstruction: `as_of_date` vs `cached_at`, and the cursor table
 

@@ -6,7 +6,7 @@ and record deviations here. The blueprint and every verified finding it relies o
 [`MULTICHAIN-HOLDINGS.md`](MULTICHAIN-HOLDINGS.md) (all pre-build items there are closed or
 explicitly scoped out); project conventions live in [`AGENTS.md`](AGENTS.md).
 
-Status: **plan complete and all decisions confirmed (Oct 17 2026); delivery 1 shipped (Oct 18 2026), next: delivery 2.**
+Status: **plan complete and all decisions confirmed (Oct 17 2026); delivery 1 accepted on real RPCs (Oct 18 2026), delivery 2 shipped, next: delivery 3.**
 The build happens in later conversations, one delivery at a time, starting with delivery 1 (see
 section 8 for how to pick the work up).
 
@@ -365,7 +365,7 @@ reference value in section 5 has to be re-read.
 ## 9. Progress
 
 - [x] Delivery 1 — Foundations (see its deviations below)
-- [ ] Delivery 2 — Date → block resolver
+- [x] Delivery 2 — Date → block resolver (acceptance output to confirm, see its notes below)
 - [ ] Delivery 3 — `EvmLogScanner`
 - [ ] Delivery 4 — Snapshot builder
 - [ ] Delivery 5 — Cursor, lock, reconstruction service
@@ -395,3 +395,21 @@ reference value in section 5 has to be re-read.
   an auth error drops that provider for the check, a data mismatch is never retried, and a check that stays
   unreachable is reported as INFRASTRUCTURE, distinct from a wrong value. Date-to-block discovery
   (bisection, its own retry handling) belongs to delivery 2.
+
+### Delivery 2 — notes and deviations
+
+- Added a result type, `EvmBlockResolution`, with four outcomes instead of a bare int: `resolved`,
+  `before_start` (day earlier than the chain's history-start block: not an error), `day_not_complete`
+  (today/future: never stored) and `error` (every provider failed). The walk (delivery 5) must treat them
+  differently.
+- Search = alternating interpolation and bisection steps over block timestamps (strict `<`: a block exactly
+  at the day's end belongs to the next day). Tested against brute force on 25 random irregular chains
+  (stalls, equal timestamps) and a 1M-block chain with a stall (≤ 45 reads).
+- `endBlockForDate($date, $lowerBoundHint)`: the walk can pass the previous day's end block; it is verified
+  before use and ignored when wrong.
+- Provider failover is per read; the head is the **highest** head any provider reports (a lagging provider
+  must not make a finished day look incomplete). This was a real bug caught by a test.
+- `bin/check-2-blocks.php` resolves the section 5 references per the mapping note (reference date D is the
+  end block of D-1) and independently verifies `ts(b) < end of day <= ts(b+1)`; same retry policy as check 1.
+- New table `evm_block_by_date` is in the README migration block; nothing reads it until delivery 5 but it can
+  be created now.
