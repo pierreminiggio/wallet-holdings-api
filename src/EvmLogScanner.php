@@ -14,8 +14,9 @@ use InvalidArgumentException;
  * WHAT IT DOES: walks eth_getLogs over [lastScannedBlock + 1, toBlock] in adaptive chunks. Each
  * chunk issues both directions (Transfer(from = wallet) and Transfer(to = wallet)); both must
  * succeed for the chunk to count. Contracts that emitted ERC-20-shaped Transfers (3 topics) go to
- * the state's token set; 4-topic Transfer-signature contracts (ERC-721-like) are kept apart, not
- * dropped, so nothing is silently lost and the snapshot builder decides what to do with them.
+ * the state's token set. Transfer-signature logs with 4 topics (ERC-721-like, tokenId indexed) are
+ * NFTs, which are out of scope by decision: they are dropped right after the fetch, so they never
+ * reach the token set, the first-activity block, the onLogs callback or stopAtFirstLog.
  *
  * THE FAILURE CLASSES (EvmRpcError) AND THE REACTION TO EACH:
  *  1. range cap (deterministic): shrink IMMEDIATELY, spend no backoff, retry the SAME `from`.
@@ -329,6 +330,10 @@ class EvmLogScanner
                 }
 
                 foreach ($result as $log) {
+                    if (count($log['topics']) !== 3) {
+                        continue; // NFT-shaped Transfer: out of scope
+                    }
+
                     $logs[self::logKey($log)] = $log;
                 }
             }
@@ -428,11 +433,7 @@ class EvmLogScanner
                 $state->noteLogBlock($block);
             }
 
-            if (count($log['topics']) === 3) {
-                $state->addToken($log['address']);
-            } else {
-                $state->addOtherTransferContract($log['address']);
-            }
+            $state->addToken($log['address']);
         }
     }
 

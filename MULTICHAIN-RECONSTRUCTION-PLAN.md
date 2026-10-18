@@ -6,7 +6,7 @@ and record deviations here. The blueprint and every verified finding it relies o
 [`MULTICHAIN-HOLDINGS.md`](MULTICHAIN-HOLDINGS.md) (all pre-build items there are closed or
 explicitly scoped out); project conventions live in [`AGENTS.md`](AGENTS.md).
 
-Status: **plan complete and all decisions confirmed (Oct 17 2026); delivery 1 accepted on real RPCs (Oct 18 2026), delivery 2 accepted, delivery 3 shipped, next: delivery 4.**
+Status: **plan complete and all decisions confirmed (Oct 17 2026); delivery 1 accepted on real RPCs (Oct 18 2026), delivery 2 accepted, delivery 3 accepted (short checks; the 340k-block `--long` window not run yet), delivery 4 shipped, next: delivery 5.**
 The build happens in later conversations, one delivery at a time, starting with delivery 1 (see
 section 8 for how to pick the work up).
 
@@ -367,7 +367,7 @@ reference value in section 5 has to be re-read.
 - [x] Delivery 1 — Foundations (see its deviations below)
 - [x] Delivery 2 — Date → block resolver (acceptance output to confirm, see its notes below)
 - [x] Delivery 3 — `EvmLogScanner`
-- [ ] Delivery 4 — Snapshot builder
+- [x] Delivery 4 — Snapshot builder
 - [ ] Delivery 5 — Cursor, lock, reconstruction service
 - [ ] Delivery 6 — Endpoint wiring, docs, end-to-end
 
@@ -429,9 +429,28 @@ reference value in section 5 has to be re-read.
 - Range-cap handling bisects between the largest size that worked and the smallest that failed, and probes ~12% above
   the converged cap only every 200 successes (about 2% of requests), instead of the blueprint's plain x1.5 growth which
   hit the cap every few chunks. Growth is `max(step + 1, step * 3 / 2)` (the integer x1.5 alone never leaves 1).
-- **To confirm: ERC-721.** A Transfer with 4 topics (tokenId indexed) matches the same filter. The scanner keeps those
-  contracts in a separate set (`otherTransferContracts`) instead of the token set, so `balanceOf` is not called on NFT
-  contracts by default and nothing is lost. The earlier manual scans (459 Base tokens) did not make this distinction.
-- The `tokens_json` column will hold the whole serialised token sets (JSON), not a bare list.
+- **NFTs are out of scope (decided Oct 18 2026).** A Transfer log with 4 topics (ERC-721-like) is dropped right after the
+  fetch: it never reaches the token set, the first-activity block or `stopAtFirstLog`. Earlier manual scans (459 Base
+  tokens) did not make this distinction, so counts may be lower than those numbers.
+- The `tokens_json` column holds the token addresses (JSON list); the other cursor fields have their own columns.
 - `bin/check-3-scan.php` covers the two Polygon windows of section 5 (the 340k-block one behind `--long`), a resume in
   the middle, a wrong-wallet negative control and the Base skipped blocks. Same retry policy as checks 1 and 2.
+
+### Delivery 4 — notes and deviations
+
+- `EvmHoldingsSnapshotBuilder` (one `EvmRpcClient` per chain, kept for the whole walk so the `eth_getCode` memo, the
+  token metadata and the Aave reserve list are paid once) and `EvmHoldingsSnapshotResult`. Provider failover is the
+  service's job (delivery 5): it builds one builder per provider.
+- **New error class `KIND_REVERT` in `EvmRpcError`** (JSON-RPC code 3, or "execution reverted"): a contract's own answer,
+  never retried and not blamed on the provider. Without it a reverting spam token would have been retried and then
+  failed every snapshot forever as a "transient".
+- Unreadable token contracts (revert, no `balanceOf`/`decimals`, empty answer from a contract with code at that block)
+  are skipped and reported, not a failure. An empty answer is only accepted after `eth_getCode` confirms code at that
+  exact block (not the memo); otherwise the snapshot fails. A failing `symbol()` falls back to `UNKNOWN`.
+- Symbols: dynamic `string` and legacy `bytes32` are decoded, control characters stripped.
+- Zero native and zero token balances are omitted (`native: null`), like the live cache. `isEmpty()` tells the service
+  when a chain has nothing at all (the live cache omits such chains; whether a reconstructed row does too is delivery 5).
+- Aave `usedAsCollateral` is `null` (decided in delivery 1). Polygon native symbol is `POL`.
+- `bin/check-4-snapshot.php`: USDT0 residual and the balances between its 7 transfers, native USDC held only in a past
+  window, Compound (Ethereum), Aave (Ethereum, BSC, Polygon), the zero cases, native balance at each chain's genesis
+  (zero one block before, non-zero at it), negative controls.

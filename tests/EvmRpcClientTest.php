@@ -190,11 +190,28 @@ test('error classes: transient / range cap / auth', function () {
         ['Archive requests require a personal token', EvmRpcError::KIND_AUTH],
         ['invalid params', EvmRpcError::KIND_AUTH],
         ['missing trie node abc (path )', EvmRpcError::KIND_AUTH],
+        // the contract's own answer: not an outage, never retried
+        ['execution reverted', EvmRpcError::KIND_REVERT],
+        ['execution reverted: ERC20: not a token', EvmRpcError::KIND_REVERT],
+        ['VM execution error.', EvmRpcError::KIND_REVERT],
     ];
 
     foreach ($cases as [$message, $expected]) {
         assertSame($expected, EvmRpcError::fromJsonRpcError(['code' => -32000, 'message' => $message])->getKind(), $message);
     }
+});
+
+test('a revert (JSON-RPC code 3, or the wording) is a contract answer: not retried, not transient', function () {
+    assertSame(EvmRpcError::KIND_REVERT, EvmRpcError::fromJsonRpcError(['code' => 3, 'message' => 'whatever'])->getKind());
+
+    $calls = [];
+    $sleeps = [];
+    $client = scripted([rpcError('execution reverted', 3)], $calls, ['retries' => 5, 'sleeps' => &$sleeps]);
+    $result = $client->request('eth_call', [[], 'latest']);
+
+    assertTrue($result instanceof EvmRpcError && $result->isRevert());
+    assertSame(1, count($calls));
+    assertSame([], $sleeps);
 });
 
 test('error classes: HTTP statuses without a usable body', function () {

@@ -22,21 +22,16 @@ final class EvmLogScanState
 {
     public const DEFAULT_STEP_SIZE = 40000;
 
-    /** @var array<string, true> contracts that emitted ERC-20-shaped Transfers (3 topics) touching the wallet */
+    /** @var array<string, true> contracts that emitted ERC-20-shaped Transfers (3 topics) touching the wallet; NFT-shaped ones (4 topics) are ignored by design */
     private array $tokens = [];
-
-    /** @var array<string, true> contracts that emitted Transfer-signature logs of another shape (4 topics: ERC-721-like) */
-    private array $otherTransferContracts = [];
 
     /**
      * @param list<string> $tokens
-     * @param list<string> $otherTransferContracts
      */
     public function __construct(
         private int $lastScannedBlock,
         private int $stepSize = self::DEFAULT_STEP_SIZE,
         array $tokens = [],
-        array $otherTransferContracts = [],
         private ?int $firstLogBlock = null,
     ) {
         if ($stepSize < 1) {
@@ -47,9 +42,6 @@ final class EvmLogScanState
             $this->tokens[strtolower($token)] = true;
         }
 
-        foreach ($otherTransferContracts as $contract) {
-            $this->otherTransferContracts[strtolower($contract)] = true;
-        }
     }
 
     /**
@@ -73,14 +65,12 @@ final class EvmLogScanState
             (int) $data['last_scanned_block'],
             (int) ($data['step_size'] ?? self::DEFAULT_STEP_SIZE),
             array_values((array) ($data['tokens'] ?? [])),
-            array_values((array) ($data['other_transfer_contracts'] ?? [])),
             isset($data['first_log_block']) ? (int) $data['first_log_block'] : null,
         );
     }
 
     /**
-     * @return array{last_scanned_block: int, step_size: int, tokens: list<string>,
-     *               other_transfer_contracts: list<string>, first_log_block: ?int}
+     * @return array{last_scanned_block: int, step_size: int, tokens: list<string>, first_log_block: ?int}
      */
     public function toArray(): array
     {
@@ -88,7 +78,6 @@ final class EvmLogScanState
             'last_scanned_block' => $this->lastScannedBlock,
             'step_size' => $this->stepSize,
             'tokens' => $this->tokens(),
-            'other_transfer_contracts' => $this->otherTransferContracts(),
             'first_log_block' => $this->firstLogBlock,
         ];
     }
@@ -120,25 +109,9 @@ final class EvmLogScanState
         return $tokens;
     }
 
-    /**
-     * @return list<string> lower-cased, sorted
-     */
-    public function otherTransferContracts(): array
-    {
-        $contracts = array_keys($this->otherTransferContracts);
-        sort($contracts);
-
-        return $contracts;
-    }
-
     public function addToken(string $address): void
     {
         $this->tokens[strtolower($address)] = true;
-    }
-
-    public function addOtherTransferContract(string $address): void
-    {
-        $this->otherTransferContracts[strtolower($address)] = true;
     }
 
     public function noteLogBlock(int $block): void

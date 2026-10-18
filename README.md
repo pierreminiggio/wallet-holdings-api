@@ -200,10 +200,21 @@ client's bounded backoff, then on the next provider; an auth error drops the pro
 block; skipped blocks (`EvmReconstructionChains`) are never requested; a block that cannot be fetched alone is
 recorded (table below) and skipped, but only after proving the failure is block-specific. The state
 (`EvmLogScanState`: last scanned block, step size, tokens, first activity block) only moves past a chunk once all
-its calls succeeded, and serialises to the cursor columns, so an interrupted scan resumes with no hole. Tokens with
-a 3-topic Transfer are ERC-20 candidates; 4-topic Transfer-signature contracts (ERC-721-like) are kept apart in
-the same state, not dropped. **Nothing calls the scanner yet** (delivery 5), and the unresolved-block table can be
+its calls succeeded, and serialises to the cursor columns, so an interrupted scan resumes with no hole. Only
+3-topic Transfers (ERC-20 shape) count: NFT-shaped Transfers (4 topics) are ignored by design. **Nothing calls the scanner yet** (delivery 5), and the unresolved-block table can be
 created now.
+
+**Delivery 4 (snapshot builder) is in place:** `EvmHoldingsSnapshotBuilder::snapshot($address, $chain, $block, $tokens)`
+returns one chain's holdings at one block in the same shape as `/holdings-now` (`native`, `tokens`,
+`defi: {compound, aave, other}`); `other` is always `[]` in a reconstruction. Native comes from `eth_getBalance`
+(symbols ETH / ETH / POL / BNB for Ethereum / Base / Polygon / BSC), every discovered token from `balanceOf` at
+that block (never summed Transfer deltas), Compound and Aave from the block-aware clients of delivery 1. Zero
+balances are omitted and a token whose contract does not exist yet at the block is a verified zero. There is no
+partial success: any read that cannot be trusted makes the whole snapshot fail (`EvmHoldingsSnapshotResult`).
+The one exception is a token contract that cannot be read as an ERC-20 (reverts, no `balanceOf`/`decimals`,
+empty answer from a contract that has code): spam and broken contracts are routine among discovered tokens, so it
+is skipped and reported (`getSkippedTokens()`), not retried and not an outage. `unsupportedChainShape()` gives the
+empty shape with `"reconstruction_supported": false` for `avalanche` / `xdai`. Nothing calls it yet (delivery 5).
 
 Checks (PHP 8.0+, no composer needed for the tests):
 
@@ -212,6 +223,7 @@ php tests/run.php            # offline unit tests (also passes with: php -n test
 php bin/check-1-reads.php    # delivery 1 acceptance against real RPCs, paste the output back
 php bin/check-2-blocks.php   # delivery 2 acceptance (reference blocks), same
 php bin/check-3-scan.php     # delivery 3 acceptance (add --long for the 340k-block Polygon window)
+php bin/check-4-snapshot.php # delivery 4 acceptance (reference balances, Compound/Aave, native genesis)
 ```
 
 ## Setup

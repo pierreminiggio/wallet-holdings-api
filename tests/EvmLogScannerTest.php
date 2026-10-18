@@ -128,13 +128,26 @@ test('scanner: discovers tokens in both directions, lower-cased and de-duplicate
     assertSame([], $result->getGaps());
 });
 
-test('scanner: ERC-721-shaped Transfers (4 topics) are kept apart from tokens, not dropped', function () {
-    $logs = [transferLog(10, TOKEN_A, SCAN_OTHER, SCAN_WALLET), transferLog(20, NFT_N, SCAN_OTHER, SCAN_WALLET, 4)];
+test('scanner: ERC-721-shaped Transfers (4 topics) are ignored entirely (tokens, first activity, onLogs)', function () {
+    $logs = [transferLog(10, TOKEN_A, SCAN_OTHER, SCAN_WALLET), transferLog(5, NFT_N, SCAN_OTHER, SCAN_WALLET, 4), transferLog(20, NFT_N, SCAN_WALLET, SCAN_OTHER, 4)];
+    $seen = [];
     $calls = [];
-    $result = (new EvmLogScanner('ethereum', [scannerClient(logHandler($logs), $calls)]))->scan(SCAN_WALLET, EvmLogScanState::startingAt(0), 100);
+    $scanner = new EvmLogScanner('ethereum', [scannerClient(logHandler($logs), $calls)], 40000, 20, null, null, static function (array $chunk) use (&$seen): void {
+        foreach ($chunk as $log) {
+            $seen[] = $log['address'];
+        }
+    });
+    $result = $scanner->scan(SCAN_WALLET, EvmLogScanState::startingAt(0), 100);
 
     assertSame([TOKEN_A], $result->getState()->tokens());
-    assertSame([NFT_N], $result->getState()->otherTransferContracts());
+    assertSame(10, $result->getState()->getFirstLogBlock(), 'an NFT transfer is not "first activity"');
+    assertSame([TOKEN_A], $seen);
+
+    // a wallet with only NFT activity looks like a wallet with none, also for stopAtFirstLog
+    $nftOnly = (new EvmLogScanner('ethereum', [scannerClient(logHandler([transferLog(5, NFT_N, SCAN_OTHER, SCAN_WALLET, 4)]), $calls)]))
+        ->scan(SCAN_WALLET, EvmLogScanState::startingAt(0), 1000, null, true);
+    assertSame(EvmLogScanResult::STATUS_COMPLETE, $nftOnly->getStatus());
+    assertSame(null, $nftOnly->getState()->getFirstLogBlock());
 });
 
 test('scanner: sends the exact topic filters (both directions, wallet topic padded and lower-cased)', function () {
@@ -438,7 +451,7 @@ test('scanner: onProgress fires periodically, onLogs receives each chunk\'s logs
 });
 
 test('scanner: state serialisation round-trips, and the step size survives a resume', function () {
-    $state = new EvmLogScanState(4999, 77, [strtoupper(TOKEN_A), TOKEN_B], [NFT_N], 123);
+    $state = new EvmLogScanState(4999, 77, [strtoupper(TOKEN_A), TOKEN_B], 123);
     $copy = EvmLogScanState::fromArray(json_decode(json_encode($state->toArray()), true));
 
     assertSame($state->toArray(), $copy->toArray());

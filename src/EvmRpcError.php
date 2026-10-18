@@ -18,6 +18,12 @@ namespace App;
  *    access refused, pruned state). Neither waiting nor shrinking helps: treat the
  *    provider as unusable for that call.
  *
+ *  - KIND_REVERT: the node executed the call and the contract reverted ("execution reverted").
+ *    That is a deterministic answer about the CONTRACT (a token without balanceOf, a
+ *    self-destructed or malicious contract), not about the provider: never retried, never shrunk,
+ *    and the provider is not blamed. Callers that probe arbitrary contracts (the snapshot
+ *    builder, on spam tokens) treat it as "this contract cannot be read", not as an outage.
+ *
  * Anything unrecognised is classified KIND_TRANSIENT: an unknown failure is retried a
  * bounded number of times, never silently turned into an empty success.
  */
@@ -26,8 +32,14 @@ final class EvmRpcError
     public const KIND_TRANSIENT = 'transient';
     public const KIND_RANGE_CAP = 'range_cap';
     public const KIND_AUTH = 'auth';
+    public const KIND_REVERT = 'revert';
 
-    // Checked first: these providers' wordings must never fall into the shrink path.
+    // Checked before everything else: a revert is the contract's answer, whatever else the text says.
+    private const REVERT_MARKERS = [
+        'execution reverted', 'reverted', 'vm execution error', 'invalid opcode',
+    ];
+
+    // Checked next: these providers' wordings must never fall into the shrink path.
     // "invalid params" comes from MULTICHAIN-HOLDINGS.md ("Auth errors are neither"): a
     // key-gated provider answering a call it will not serve. "missing trie node" /
     // "header not found" are the non-archive nodes' answer to an old-state read.
@@ -83,6 +95,11 @@ final class EvmRpcError
         return $this->rpcCode;
     }
 
+    public function isRevert(): bool
+    {
+        return $this->kind === self::KIND_REVERT;
+    }
+
     public function isTransient(): bool
     {
         return $this->kind === self::KIND_TRANSIENT;
@@ -129,7 +146,8 @@ final class EvmRpcError
             $message = 'JSON-RPC error without a message';
         }
 
-        $kind = self::classifyMessage($message);
+        // JSON-RPC code 3 is the standard "execution reverted" code (geth and compatible nodes).
+        $kind = $code === 3 ? self::KIND_REVERT : self::classifyMessage($message);
 
         if ($kind === self::KIND_TRANSIENT && ! self::matches(strtolower($message), self::TRANSIENT_MARKERS)) {
             // No marker matched at all: let the HTTP status refine the default, if it can.
@@ -153,6 +171,10 @@ final class EvmRpcError
     public static function classifyMessage(string $message): string
     {
         $lower = strtolower($message);
+
+        if (self::matches($lower, self::REVERT_MARKERS)) {
+            return self::KIND_REVERT;
+        }
 
         if (self::matches($lower, self::AUTH_MARKERS)) {
             return self::KIND_AUTH;
