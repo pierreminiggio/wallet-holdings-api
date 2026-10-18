@@ -6,7 +6,7 @@ and record deviations here. The blueprint and every verified finding it relies o
 [`MULTICHAIN-HOLDINGS.md`](MULTICHAIN-HOLDINGS.md) (all pre-build items there are closed or
 explicitly scoped out); project conventions live in [`AGENTS.md`](AGENTS.md).
 
-Status: **plan complete and all decisions confirmed (Oct 17 2026); delivery 1 accepted on real RPCs (Oct 18 2026), delivery 2 shipped, next: delivery 3.**
+Status: **plan complete and all decisions confirmed (Oct 17 2026); delivery 1 accepted on real RPCs (Oct 18 2026), delivery 2 accepted, delivery 3 shipped, next: delivery 4.**
 The build happens in later conversations, one delivery at a time, starting with delivery 1 (see
 section 8 for how to pick the work up).
 
@@ -366,7 +366,7 @@ reference value in section 5 has to be re-read.
 
 - [x] Delivery 1 — Foundations (see its deviations below)
 - [x] Delivery 2 — Date → block resolver (acceptance output to confirm, see its notes below)
-- [ ] Delivery 3 — `EvmLogScanner`
+- [x] Delivery 3 — `EvmLogScanner`
 - [ ] Delivery 4 — Snapshot builder
 - [ ] Delivery 5 — Cursor, lock, reconstruction service
 - [ ] Delivery 6 — Endpoint wiring, docs, end-to-end
@@ -413,3 +413,25 @@ reference value in section 5 has to be re-read.
   end block of D-1) and independently verifies `ts(b) < end of day <= ts(b+1)`; same retry policy as check 1.
 - New table `evm_block_by_date` is in the README migration block; nothing reads it until delivery 5 but it can
   be created now.
+
+### Delivery 3 — notes and deviations
+
+- `EvmLogScanner`, `EvmLogScanState`, `EvmLogScanResult`, `EvmUnresolvedBlockRepository` (Table 3). The scanner returns
+  one of `complete` / `time_budget` / `first_activity` (Phase 0: stop after the first chunk with a matching log) /
+  `provider_error` (resumable, nothing recorded as a gap).
+- **Reading of "transient never shrinks"**: the client does the bounded same-range backoff; if every provider still
+  fails, the scanner first checks that some provider is alive (otherwise `provider_error`, no shrinking, no gaps), then
+  splits the range to isolate the block that cannot be served. This is the only case where a transient leads to
+  shrinking, and it is needed for the dense Base blocks that time out even alone.
+- **Added safeguards (not in the plan), because a total outage must never look like a lot of bad blocks:** a gap is
+  recorded only if a nearby block (+1, +2, +4 ... +64, backward only near the end of the scan) succeeds with the same
+  query; more than 5 gaps in a row stops the scan. Adjacent bad blocks (the Base pairs) are tolerated.
+- Range-cap handling bisects between the largest size that worked and the smallest that failed, and probes ~12% above
+  the converged cap only every 200 successes (about 2% of requests), instead of the blueprint's plain x1.5 growth which
+  hit the cap every few chunks. Growth is `max(step + 1, step * 3 / 2)` (the integer x1.5 alone never leaves 1).
+- **To confirm: ERC-721.** A Transfer with 4 topics (tokenId indexed) matches the same filter. The scanner keeps those
+  contracts in a separate set (`otherTransferContracts`) instead of the token set, so `balanceOf` is not called on NFT
+  contracts by default and nothing is lost. The earlier manual scans (459 Base tokens) did not make this distinction.
+- The `tokens_json` column will hold the whole serialised token sets (JSON), not a bare list.
+- `bin/check-3-scan.php` covers the two Polygon windows of section 5 (the 340k-block one behind `--long`), a resume in
+  the middle, a wrong-wallet negative control and the Base skipped blocks. Same retry policy as checks 1 and 2.

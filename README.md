@@ -192,12 +192,26 @@ start, day not complete, error. `EvmBlockByDateRepository` caches resolved days 
 `evm_block_by_date` table, see the migration block below (**run it before delivery 5 needs it; nothing
 reads it yet**).
 
+**Delivery 3 (log scanner) is in place:** `EvmLogScanner` discovers the ERC-20 contracts a wallet ever touched by
+scanning `eth_getLogs` Transfer events in both directions, in adaptive resumable chunks. A range cap shrinks the
+chunk immediately (no backoff) and the scanner converges on the cap instead of re-probing it; a transient error
+(rate limit, `Request timeout on the free plan`, empty or malformed body) is retried on the same range with the
+client's bounded backoff, then on the next provider; an auth error drops the provider; the shrink floor is one
+block; skipped blocks (`EvmReconstructionChains`) are never requested; a block that cannot be fetched alone is
+recorded (table below) and skipped, but only after proving the failure is block-specific. The state
+(`EvmLogScanState`: last scanned block, step size, tokens, first activity block) only moves past a chunk once all
+its calls succeeded, and serialises to the cursor columns, so an interrupted scan resumes with no hole. Tokens with
+a 3-topic Transfer are ERC-20 candidates; 4-topic Transfer-signature contracts (ERC-721-like) are kept apart in
+the same state, not dropped. **Nothing calls the scanner yet** (delivery 5), and the unresolved-block table can be
+created now.
+
 Checks (PHP 8.0+, no composer needed for the tests):
 
 ```
 php tests/run.php            # offline unit tests (also passes with: php -n tests/run.php)
 php bin/check-1-reads.php    # delivery 1 acceptance against real RPCs, paste the output back
 php bin/check-2-blocks.php   # delivery 2 acceptance (reference blocks), same
+php bin/check-3-scan.php     # delivery 3 acceptance (add --long for the 340k-block Polygon window)
 ```
 
 ## Setup
@@ -336,6 +350,24 @@ ALTER TABLE `evm_block_by_date`
 
 ALTER TABLE `evm_block_by_date`
   MODIFY `id` bigint(20) NOT NULL AUTO_INCREMENT;
+
+-- Blocks the log scanner could not fetch even alone, on every provider (delivery 3). A human reviews
+-- them on a block explorer, then promotes them into EvmReconstructionChains::SKIPPED_BLOCKS.
+CREATE TABLE `multichain_reconstruction_unresolved_block` (
+  `id` bigint(20) NOT NULL,
+  `chain` varchar(32) NOT NULL,
+  `block_number` bigint(20) NOT NULL,
+  `address` varchar(42) NOT NULL,
+  `last_error` text NOT NULL,
+  `recorded_at` bigint(20) NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+ALTER TABLE `multichain_reconstruction_unresolved_block`
+  ADD PRIMARY KEY (`id`),
+  ADD KEY `chain_block_number` (`chain`, `block_number`);
+
+ALTER TABLE `multichain_reconstruction_unresolved_block`
+  MODIFY `id` bigint(20) NOT NULL AUTO_INCREMENT;
 ```
 
 `multichain_holdings_cache` caches the *entire* `/holdings-now/{address}` response body
@@ -375,6 +407,17 @@ same row twice with the same value, which is harmless, so `find()` takes any. On
 stored: `EvmBlockResolver` returns `DAY_NOT_COMPLETE` for today or a future date (the chain head has not
 reached the end of that day) and never stores it; `BEFORE_START` (a day before the chain's history-start
 block) and provider failures are not stored either.
+
+### Unresolved blocks: `multichain_reconstruction_unresolved_block`
+
+When `EvmLogScanner` meets a block that cannot be fetched even alone, on every configured provider, after
+bounded retries, it must not halt a multi-day scan. It records the block here (`EvmUnresolvedBlockRepository::record`,
+fed by the scanner's `onGap` callback) and moves on. It does so only if a nearby block of the same query shape
+succeeds, which proves the failure is specific to that block and not a provider outage; otherwise the scan stops
+with `provider_error` and resumes later. A human then checks the block on a block explorer and, if acceptable,
+adds it to `EvmReconstructionChains::SKIPPED_BLOCKS` with a comment saying what was verified. **A recorded or
+skipped block is a known, accepted hole**: a third-party transfer *to* the wallet inside it is only visible in
+event logs and is missed if that token appears nowhere else in the history.
 
 ### Historical reconstruction: `as_of_date` vs `cached_at`, and the cursor table
 
