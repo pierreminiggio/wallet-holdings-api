@@ -6,7 +6,7 @@
  * 2025-12-16 22:18 UTC, so a short walk is enough), with IN-MEMORY repositories: no database is needed and
  * nothing is written anywhere.
  *
- *   php bin/check-5-service.php [--long] [--config=config.php] [--retries=6] [--rounds=4] [--round-delay=5]
+ *   php bin/check-5-service.php [--long] [--idle-only] [--config=config.php] [--retries=6] [--rounds=4] [--round-delay=5]
  *                               [--rpc-polygon=<url>]
  *
  * What it proves:
@@ -18,7 +18,7 @@
  *      and each day has exactly one row;
  *   3. re-asking an already walked date is a pure read (no log request at all);
  *   4. cursors never advanced without their rows;
- *   5. a wallet with no activity is BEFORE_GENESIS and writes nothing.
+ *   5. a wallet with no activity is BEFORE_GENESIS and writes nothing (--idle-only runs just this one).
  *
  * The walk scans every Polygon block from the history start with drpc.org's ~101-block cap, so the default run
  * (two days, ~46k blocks) takes several minutes and --long (four days, which covers more of the section 5
@@ -82,7 +82,9 @@ $rounds = max(1, (int) ($options['rounds'] ?? 4));
 $roundDelay = (int) ($options['round-delay'] ?? 5);
 
 $wallet = $options['wallet'] ?? '0x0ed2aDcC25ab3576928C1b4F47bAC3e8F30AfEDe';
-$idleWallet = '0x0000000000000000000000000000000000001234';
+// An address nobody controls and nobody has a reason to fund: derived from a hash, not a vanity address (vanity
+// addresses like 0x...1234 do get dust sent to them, which would be real activity, not a service bug).
+$idleWallet = $options['idle-wallet'] ?? '0x' . sha1('wallet-holdings-api idle wallet for check-5-service');
 
 const NATIVE_USDC = '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359';
 const USDC_BEFORE_HISTORY_START = '18.99304'; // balance at block 80,406,106, section 5
@@ -201,140 +203,151 @@ $check = static function (string $id, array $problems) use (&$failures): void {
 $day1 = '2025-12-16';
 $day2 = isset($options['long']) ? '2025-12-19' : '2025-12-17';
 
-echo "wallet {$wallet}, Polygon only, first request {$day1}, second request {$day2}\n\n";
+if (! isset($options['idle-only'])) {
+    echo "wallet {$wallet}, Polygon only, first request {$day1}, second request {$day2}\n\n";
 
-// ---- 1. first request: the genesis day ------------------------------------------------------------------
-echo "first request for {$day1} (Phase 0, then one day)...\n";
-$first = run($service, $wallet, $day1, $rounds, $roundDelay);
-$problems = [];
+    // ---- 1. first request: the genesis day ------------------------------------------------------------------
+    echo "first request for {$day1} (Phase 0, then one day)...\n";
+    $first = run($service, $wallet, $day1, $rounds, $roundDelay);
+    $problems = [];
 
-if ($first->getStatus() !== Outcome::STATUS_FOUND) {
-    $problems[] = 'expected found, got ' . $first->getStatus() . ': ' . $first->getMessage();
-} else {
-    $row = json_decode($first->getResponseJson(), true);
-    $polygon = $row['holdings']['polygon'] ?? null;
-    $endBlock = $blocks->rows["polygon|{$day1}"] ?? null;
-
-    if ($cache->datesOf('reconstructed') !== [$day1]) {
-        $problems[] = 'expected exactly one reconstructed row for ' . $day1 . ', got ' . json_encode($cache->datesOf('reconstructed'));
-    }
-
-    if ($polygon === null || $endBlock === null) {
-        $problems[] = 'no Polygon holdings in the row, or the end block was not resolved';
+    if ($first->getStatus() !== Outcome::STATUS_FOUND) {
+        $problems[] = 'expected found, got ' . $first->getStatus() . ': ' . $first->getMessage();
     } else {
-        $independent = (new EvmRpcClient($config->providers('polygon')[0]['url'], null, 60, $retries, 2000))->getBalance($wallet, $endBlock);
+        $row = json_decode($first->getResponseJson(), true);
+        $polygon = $row['holdings']['polygon'] ?? null;
+        $endBlock = $blocks->rows["polygon|{$day1}"] ?? null;
 
-        if ($independent instanceof App\EvmRpcError) {
-            $problems[] = 'could not read the native balance independently: ' . $independent;
+        if ($cache->datesOf('reconstructed') !== [$day1]) {
+            $problems[] = 'expected exactly one reconstructed row for ' . $day1 . ', got ' . json_encode($cache->datesOf('reconstructed'));
+        }
+
+        if ($polygon === null || $endBlock === null) {
+            $problems[] = 'no Polygon holdings in the row, or the end block was not resolved';
         } else {
-            $expectedNative = AbiCodec::formatUnits(AbiCodec::hexToDec(AbiCodec::strip0x($independent)), 18);
+            $independent = (new EvmRpcClient($config->providers('polygon')[0]['url'], null, 60, $retries, 2000))->getBalance($wallet, $endBlock);
 
-            if (norm($polygon['native']['amount'] ?? null) !== norm($expectedNative)) {
-                $problems[] = "native POL {$polygon['native']['amount']} != {$expectedNative} read directly at block {$endBlock}";
+            if ($independent instanceof App\EvmRpcError) {
+                $problems[] = 'could not read the native balance independently: ' . $independent;
+            } else {
+                $expectedNative = AbiCodec::formatUnits(AbiCodec::hexToDec(AbiCodec::strip0x($independent)), 18);
+
+                if (norm($polygon['native']['amount'] ?? null) !== norm($expectedNative)) {
+                    $problems[] = "native POL {$polygon['native']['amount']} != {$expectedNative} read directly at block {$endBlock}";
+                }
+            }
+
+            $usdc = null;
+
+            foreach ($polygon['tokens'] as $token) {
+                if (strtolower($token['contract']) === NATIVE_USDC) {
+                    $usdc = norm($token['amount']);
+                }
+            }
+
+            $expected = expectedUsdc($endBlock);
+
+            if ($usdc !== ($expected === '0' ? null : $expected)) {
+                $problems[] = 'native USDC ' . ($usdc ?? 'absent') . " != {$expected} (18.99304 plus the known transfers up to block {$endBlock})";
+            }
+
+            if (($row['holdings']['avalanche']['reconstruction_supported'] ?? null) !== false) {
+                $problems[] = 'unsupported chains are not flagged in the row';
+            }
+
+            echo "        end block of {$day1}: {$endBlock}, POL {$polygon['native']['amount']}, tokens: " . count($polygon['tokens']) . ', first activity block ' . ($cursors->find($wallet, 'polygon')['firstActivityBlock'] ?? 'none') . "\n";
+        }
+    }
+
+    $check('first-request-genesis-day', $problems);
+
+    $scannedThroughFirst = $cursors->find($wallet, 'polygon')['state']->getLastScannedBlock() ?? -1;
+    $firstRow = $cache->getCacheForDate($wallet, $day1)['responseJson'] ?? null;
+
+    // ---- 2. second request resumes from the cursor -----------------------------------------------------------------
+    echo "\nsecond request for {$day2} (resume)...\n";
+    RangeRecordingClient::$ranges = [];
+    $second = run($service, $wallet, $day2, $rounds, $roundDelay);
+    $problems = [];
+
+    if ($second->getStatus() !== Outcome::STATUS_FOUND) {
+        $problems[] = 'expected found, got ' . $second->getStatus() . ': ' . $second->getMessage();
+    } else {
+        $expectedDays = [];
+
+        for ($d = $day1; $d <= $day2; $d = gmdate('Y-m-d', strtotime($d . ' +1 day'))) {
+            $expectedDays[] = $d;
+        }
+
+        if ($cache->datesOf('reconstructed') !== $expectedDays) {
+            $problems[] = 'expected exactly one row per day ' . json_encode($expectedDays) . ', got ' . json_encode($cache->datesOf('reconstructed'));
+        }
+
+        foreach (RangeRecordingClient::$ranges as [$from, $to]) {
+            if ($from <= $scannedThroughFirst) {
+                $problems[] = "log request {$from}-{$to} re-scans blocks the first request already covered (through {$scannedThroughFirst})";
+
+                break;
             }
         }
 
-        $usdc = null;
+        if (($cache->getCacheForDate($wallet, $day1)['responseJson'] ?? null) !== $firstRow) {
+            $problems[] = "the row for {$day1} changed";
+        }
 
-        foreach ($polygon['tokens'] as $token) {
+        $row2 = json_decode($second->getResponseJson(), true);
+        $end2 = $blocks->rows["polygon|{$day2}"] ?? null;
+        $usdc2 = null;
+
+        foreach ($row2['holdings']['polygon']['tokens'] ?? [] as $token) {
             if (strtolower($token['contract']) === NATIVE_USDC) {
-                $usdc = norm($token['amount']);
+                $usdc2 = norm($token['amount']);
             }
         }
 
-        $expected = expectedUsdc($endBlock);
+        $expected2 = $end2 === null ? null : expectedUsdc($end2);
 
-        if ($usdc !== ($expected === '0' ? null : $expected)) {
-            $problems[] = 'native USDC ' . ($usdc ?? 'absent') . " != {$expected} (18.99304 plus the known transfers up to block {$endBlock})";
+        if ($end2 === null || $usdc2 !== ($expected2 === '0' ? null : $expected2)) {
+            $problems[] = 'native USDC on ' . $day2 . ' = ' . ($usdc2 ?? 'absent') . ", expected {$expected2} (end block {$end2})";
         }
 
-        if (($row['holdings']['avalanche']['reconstruction_supported'] ?? null) !== false) {
-            $problems[] = 'unsupported chains are not flagged in the row';
-        }
-
-        echo "        end block of {$day1}: {$endBlock}, POL {$polygon['native']['amount']}, tokens: " . count($polygon['tokens']) . ', first activity block ' . ($cursors->find($wallet, 'polygon')['firstActivityBlock'] ?? 'none') . "\n";
+        echo "        end block of {$day2}: {$end2}, native USDC " . ($usdc2 ?? 'absent') . ', log requests in this resume: ' . count(RangeRecordingClient::$ranges) . "\n";
     }
+
+    $check('second-request-resumes-from-cursor', $problems);
+
+    // ---- 3. an already walked date is a pure read ---------------------------------------------------------------------
+    RangeRecordingClient::$ranges = [];
+    $rowsBefore = count($cache->rows);
+    $again = run($service, $wallet, $day1, $rounds, $roundDelay);
+    $check('already-walked-date-is-a-pure-read', array_filter([
+        $again->getStatus() !== Outcome::STATUS_FOUND ? 'expected found, got ' . $again->getStatus() : null,
+        RangeRecordingClient::$ranges !== [] ? count(RangeRecordingClient::$ranges) . ' log requests were made' : null,
+        count($cache->rows) !== $rowsBefore ? 'a row was written' : null,
+    ]));
+
+    // ---- 4. invariants ----------------------------------------------------------------------------------------------
+    $check('cursor-never-ahead-of-rows', $cursors->violations);
+    $check('no-unresolved-blocks-on-this-window', array_map(static fn (array $u): string => json_encode($u), $unresolved->recorded));
+
+
 }
-
-$check('first-request-genesis-day', $problems);
-
-$scannedThroughFirst = $cursors->find($wallet, 'polygon')['state']->getLastScannedBlock() ?? -1;
-$firstRow = $cache->getCacheForDate($wallet, $day1)['responseJson'] ?? null;
-
-// ---- 2. second request resumes from the cursor -----------------------------------------------------------------
-echo "\nsecond request for {$day2} (resume)...\n";
-RangeRecordingClient::$ranges = [];
-$second = run($service, $wallet, $day2, $rounds, $roundDelay);
-$problems = [];
-
-if ($second->getStatus() !== Outcome::STATUS_FOUND) {
-    $problems[] = 'expected found, got ' . $second->getStatus() . ': ' . $second->getMessage();
-} else {
-    $expectedDays = [];
-
-    for ($d = $day1; $d <= $day2; $d = gmdate('Y-m-d', strtotime($d . ' +1 day'))) {
-        $expectedDays[] = $d;
-    }
-
-    if ($cache->datesOf('reconstructed') !== $expectedDays) {
-        $problems[] = 'expected exactly one row per day ' . json_encode($expectedDays) . ', got ' . json_encode($cache->datesOf('reconstructed'));
-    }
-
-    foreach (RangeRecordingClient::$ranges as [$from, $to]) {
-        if ($from <= $scannedThroughFirst) {
-            $problems[] = "log request {$from}-{$to} re-scans blocks the first request already covered (through {$scannedThroughFirst})";
-
-            break;
-        }
-    }
-
-    if (($cache->getCacheForDate($wallet, $day1)['responseJson'] ?? null) !== $firstRow) {
-        $problems[] = "the row for {$day1} changed";
-    }
-
-    $row2 = json_decode($second->getResponseJson(), true);
-    $end2 = $blocks->rows["polygon|{$day2}"] ?? null;
-    $usdc2 = null;
-
-    foreach ($row2['holdings']['polygon']['tokens'] ?? [] as $token) {
-        if (strtolower($token['contract']) === NATIVE_USDC) {
-            $usdc2 = norm($token['amount']);
-        }
-    }
-
-    $expected2 = $end2 === null ? null : expectedUsdc($end2);
-
-    if ($end2 === null || $usdc2 !== ($expected2 === '0' ? null : $expected2)) {
-        $problems[] = 'native USDC on ' . $day2 . ' = ' . ($usdc2 ?? 'absent') . ", expected {$expected2} (end block {$end2})";
-    }
-
-    echo "        end block of {$day2}: {$end2}, native USDC " . ($usdc2 ?? 'absent') . ', log requests in this resume: ' . count(RangeRecordingClient::$ranges) . "\n";
-}
-
-$check('second-request-resumes-from-cursor', $problems);
-
-// ---- 3. an already walked date is a pure read ---------------------------------------------------------------------
-RangeRecordingClient::$ranges = [];
-$rowsBefore = count($cache->rows);
-$again = run($service, $wallet, $day1, $rounds, $roundDelay);
-$check('already-walked-date-is-a-pure-read', array_filter([
-    $again->getStatus() !== Outcome::STATUS_FOUND ? 'expected found, got ' . $again->getStatus() : null,
-    RangeRecordingClient::$ranges !== [] ? count(RangeRecordingClient::$ranges) . ' log requests were made' : null,
-    count($cache->rows) !== $rowsBefore ? 'a row was written' : null,
-]));
-
-// ---- 4. invariants ----------------------------------------------------------------------------------------------
-$check('cursor-never-ahead-of-rows', $cursors->violations);
-$check('no-unresolved-blocks-on-this-window', array_map(static fn (array $u): string => json_encode($u), $unresolved->recorded));
 
 // ---- 5. a wallet with no activity ---------------------------------------------------------------------------------
-echo "\nrequest for a wallet with no activity...\n";
+echo "\nrequest for a wallet with no activity ({$idleWallet})...\n";
 $rowsBefore = count($cache->rows);
 $idle = run($service, $idleWallet, $day1, $rounds, $roundDelay);
 $check('idle-wallet-is-before-genesis', array_filter([
     $idle->getStatus() !== Outcome::STATUS_BEFORE_GENESIS ? 'expected before_genesis, got ' . $idle->getStatus() . ': ' . $idle->getMessage() : null,
     count($cache->rows) !== $rowsBefore ? 'rows were written for a wallet with no activity' : null,
 ]));
+
+if ($idle->getStatus() !== Outcome::STATUS_BEFORE_GENESIS) {
+    // Evidence, so a real activity on that address can be told apart from a service bug.
+    echo '        idle wallet ' . $idleWallet . ': first activity block ' . ($cursors->find($idleWallet, 'polygon')['firstActivityBlock'] ?? 'none')
+        . ', tokens found: ' . json_encode($cursors->find($idleWallet, 'polygon')['state']->tokens() ?? []) . "\n";
+    echo '        row: ' . substr((string) $idle->getResponseJson(), 0, 700) . "\n";
+}
 
 echo $failures === 0 ? "\nALL OK\n" : "\n{$failures} check(s) failed\n";
 
