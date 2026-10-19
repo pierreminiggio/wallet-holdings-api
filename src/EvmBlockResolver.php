@@ -168,6 +168,24 @@ class EvmBlockResolver
     }
 
     /**
+     * Timestamp (unix seconds) of a block, over the same provider failover and cache as the search.
+     */
+    public function timestampOf(int $block): int|EvmRpcError
+    {
+        return $this->timestamp($block);
+    }
+
+    /**
+     * The UTC calendar date (YYYY-MM-DD) a block belongs to.
+     */
+    public function dateOfBlock(int $block): string|EvmRpcError
+    {
+        $timestamp = $this->timestamp($block);
+
+        return $timestamp instanceof EvmRpcError ? $timestamp : gmdate('Y-m-d', $timestamp);
+    }
+
+    /**
      * The highest head any provider reports. Not the first answer: a provider lagging behind
      * would report an older head, and a day that has actually ended would then look
      * incomplete. Fails only when no provider answers at all.

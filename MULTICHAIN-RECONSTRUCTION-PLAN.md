@@ -6,7 +6,7 @@ and record deviations here. The blueprint and every verified finding it relies o
 [`MULTICHAIN-HOLDINGS.md`](MULTICHAIN-HOLDINGS.md) (all pre-build items there are closed or
 explicitly scoped out); project conventions live in [`AGENTS.md`](AGENTS.md).
 
-Status: **plan complete and all decisions confirmed (Oct 17 2026); delivery 1 accepted on real RPCs (Oct 18 2026), delivery 2 accepted, delivery 3 accepted (short checks; the 340k-block `--long` window not run yet), delivery 4 shipped, next: delivery 5.**
+Status: **plan complete and all decisions confirmed (Oct 17 2026); delivery 1 accepted on real RPCs (Oct 18 2026), delivery 2 accepted, delivery 3 accepted (short checks; the 340k-block `--long` window not run yet), delivery 4 accepted, delivery 5 shipped, next: delivery 6.**
 The build happens in later conversations, one delivery at a time, starting with delivery 1 (see
 section 8 for how to pick the work up).
 
@@ -368,7 +368,7 @@ reference value in section 5 has to be re-read.
 - [x] Delivery 2 — Date → block resolver (acceptance output to confirm, see its notes below)
 - [x] Delivery 3 — `EvmLogScanner`
 - [x] Delivery 4 — Snapshot builder
-- [ ] Delivery 5 — Cursor, lock, reconstruction service
+- [x] Delivery 5 — Cursor, lock, reconstruction service
 - [ ] Delivery 6 — Endpoint wiring, docs, end-to-end
 
 ### Delivery 1 — notes and deviations
@@ -466,3 +466,31 @@ reference value in section 5 has to be re-read.
   asserted both; it now asserts Aave only and prints the Compound count.
 - Native genesis pairs are self-controlling (zero one block before, non-zero at genesis); a burn address is not a valid
   wrong-wallet control because it holds funds, so the wrong-wallet control no longer applies to them.
+
+### Delivery 5 — notes and deviations
+
+- Added `MultichainChainWalk` (per-chain mutable state of one request, an object so the scanner's progress callback sees the
+  current cursor date), `MultichainReconstructionOutcome`, `EvmReconstructionLock`, `MultichainReconstructionCursorRepository`
+  (Table 2) and `MultichainHoldingsReconstructionService`.
+- **A sixth outcome, `storage_error` (500)**, for a database or lock-directory failure: not one of the five in the plan,
+  kept apart from `inconsistent` (which means cursors and rows disagree) and from `provider_error`.
+- **Tests use the real scanner, resolver and builder over a fake RPC chain** instead of a fake scanner: it exercises the
+  whole stack (12-second blocks, a sold-to-zero token, a token created mid-walk, Polygon's history start). They cover every
+  case of the plan: interrupt and resume (no hole, no duplicate row, equal to an uninterrupted walk), a crash between a row and
+  its cursor, a live row skipped while the cursor moves past it, `before_genesis`, `inconsistent`, overlapping requests
+  (`busy`, locks released after busy and after failure), provider failover, and the invariant "a cursor never saved without
+  its row" enforced by the in-memory cursor repository.
+- **Phase 0 detail found while designing it:** `EvmLogScanner` now returns `first_activity` BEFORE its progress callback, so a
+  Phase 0 progress row can never be saved past the first log while `first_activity_block` is still null (a crash right after would
+  have lost the first activity for good). Tested.
+- **Native genesis** = coarse balance samples every 500,000 blocks (plus the target block), then a bisection in the first
+  zero-to-non-zero window, as in the blueprint. First activity = min(native genesis, first log). Limitation: a native-only wallet
+  whose funds came and went entirely between two samples and left no token log is not seen.
+- **Which chains appear in a row**: a supported chain with nothing at all on a day is omitted (the live cache omits it too);
+  `avalanche` and `xdai` are always there, empty and flagged. Decision 6's "simply empty" is read this way: **to confirm in delivery 6**.
+- Locks: all (chain, provider) locks of every walked chain are taken up front, non-blocking; any one taken means `busy` with
+  `BUSY_RETRY_AFTER_SECONDS = 60`. A chain with no provider (BSC without a key) fails the walk (`provider_error`), never a silent skip.
+- A discovered token set can include tokens first seen after the day being snapshotted (a chunk can span days): harmless, balances
+  come from `balanceOf` at the day's block.
+- `bin/check-5-service.php` runs the real service on Polygon only, with in-memory repositories (no database), against real RPCs.
+  Not covered there, left to delivery 6's end-to-end: Ethereum/Base/BSC walks, a real database, the HTTP layer.

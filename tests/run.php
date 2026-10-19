@@ -33,6 +33,7 @@ set_error_handler(static function (int $severity, string $message, string $file,
 
 require __DIR__ . '/support/harness.php';
 require __DIR__ . '/support/fake_rpc.php';
+require __DIR__ . '/support/memory_repositories.php';
 
 $only = $argv[1] ?? null;
 

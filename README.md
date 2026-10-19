@@ -216,6 +216,19 @@ empty answer from a contract that has code): spam and broken contracts are routi
 is skipped and reported (`getSkippedTokens()`), not retried and not an outage. `unsupportedChainShape()` gives the
 empty shape with `"reconstruction_supported": false` for `avalanche` / `xdai`. Nothing calls it yet (delivery 5).
 
+**Delivery 5 (cursor, lock, reconstruction service) is in place, still not wired to any endpoint:**
+`MultichainHoldingsReconstructionService::reconstruct($address, $date)` walks day by day from the wallet's first
+activity (or from the cursor) to a past date, writing one `reconstructed` row per day and advancing the cursors only
+after the row. It returns a `MultichainReconstructionOutcome`: `found` (200) / `before_genesis` (400) /
+`inconsistent` (500) / `storage_error` (500) / `provider_error` (502, progress saved, a retry resumes) / `busy`
+(409 with `Retry-After`). Existing rows win: a day that already has a row (live, or left by an interrupted walk) is
+never overwritten, but its logs are still scanned and the cursors move past it. A chain with nothing on a day is
+omitted from that row like the live cache omits it; `avalanche` and `xdai` are always present, empty, with
+`"reconstruction_supported": false`. A chain with no configured provider fails the walk loudly (BSC needs a
+NodeReal URL in `config.php`). `EvmReconstructionLock` takes one `flock` file per (chain, provider) in the
+`reconstruction.lock_directory`, non-blocking, released at the end of every request and by the OS if the process
+dies; it assumes a single web server. The service calls `ignore_user_abort(true)` and `set_time_limit(0)`.
+
 Checks (PHP 8.0+, no composer needed for the tests):
 
 ```
@@ -224,6 +237,7 @@ php bin/check-1-reads.php    # delivery 1 acceptance against real RPCs, paste th
 php bin/check-2-blocks.php   # delivery 2 acceptance (reference blocks), same
 php bin/check-3-scan.php     # delivery 3 acceptance (add --long for the 340k-block Polygon window)
 php bin/check-4-snapshot.php # delivery 4 acceptance (reference balances, Compound/Aave, native genesis)
+php bin/check-5-service.php  # delivery 5 acceptance (Polygon walk with in-memory repositories; add --long for 4 days)
 ```
 
 ## Setup
@@ -380,6 +394,26 @@ ALTER TABLE `multichain_reconstruction_unresolved_block`
 
 ALTER TABLE `multichain_reconstruction_unresolved_block`
   MODIFY `id` bigint(20) NOT NULL AUTO_INCREMENT;
+
+-- Resume state of the multichain historical reconstruction, per (address, chain) (delivery 5).
+CREATE TABLE `multichain_reconstruction_cursor` (
+  `id` bigint(20) NOT NULL,
+  `address` varchar(42) NOT NULL,
+  `chain` varchar(32) NOT NULL,
+  `last_scanned_block` bigint(20) NOT NULL,
+  `step_size` int(11) NOT NULL,
+  `tokens_json` longtext NOT NULL,
+  `first_activity_block` bigint(20) NULL,
+  `cursor_date` date NULL,
+  `updated_at` bigint(20) NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+ALTER TABLE `multichain_reconstruction_cursor`
+  ADD PRIMARY KEY (`id`),
+  ADD KEY `address_chain_id` (`address`, `chain`, `id`);
+
+ALTER TABLE `multichain_reconstruction_cursor`
+  MODIFY `id` bigint(20) NOT NULL AUTO_INCREMENT;
 ```
 
 `multichain_holdings_cache` caches the *entire* `/holdings-now/{address}` response body
@@ -430,6 +464,19 @@ with `provider_error` and resumes later. A human then checks the block on a bloc
 adds it to `EvmReconstructionChains::SKIPPED_BLOCKS` with a comment saying what was verified. **A recorded or
 skipped block is a known, accepted hole**: a third-party transfer *to* the wallet inside it is only visible in
 event logs and is missed if that token appears nowhere else in the history.
+
+### Reconstruction cursor: `multichain_reconstruction_cursor`
+
+One row per advancement per `(address, chain)`, the newest (highest `id`, not `updated_at`: several rows can share
+a second) wins. It exists because the cache rows cannot tell the walk where to resume: a row lists only tokens with
+a current balance, so a token that was held and then sold to zero disappears from later rows. Columns:
+`last_scanned_block` (highest block whose logs were fully fetched; never advanced past a failed range),
+`step_size` (the scanner's adaptive chunk size, so a resume does not re-learn the provider's cap), `tokens_json`
+(every token contract discovered so far, addresses only), `first_activity_block` (the chain's first activity, `NULL`
+until Phase 0 finds it) and `cursor_date` (the date the walk has **fully completed through**, all its rows written;
+`NULL` until the first day is done). Progress rows saved while a long scan runs keep `cursor_date` unchanged and only
+move the scan fields. **A cursor never advances without its row**: `cursor_date` moves to a day only after that day's
+`multichain_holdings_cache` row exists. `MultichainReconstructionCursorRepository` is the only reader and writer.
 
 ### Historical reconstruction: `as_of_date` vs `cached_at`, and the cursor table
 

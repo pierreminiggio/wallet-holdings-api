@@ -197,13 +197,16 @@ class EvmLogScanner
 
                 $state->setStepSize(max(1, $next));
 
+                // Checked BEFORE the progress callback on purpose: a Phase 0 caller persists progress rows
+                // with "no activity found yet", and such a row must never be written for a state that is
+                // already past the first log (a crash right after would lose the first activity for good).
+                if ($stopAtFirstLog && $fetched['logs'] !== []) {
+                    return new EvmLogScanResult(EvmLogScanResult::STATUS_FIRST_ACTIVITY, $state, $gaps, $chunks);
+                }
+
                 if ($this->onProgress !== null && $sinceProgress >= $this->progressEveryChunks) {
                     ($this->onProgress)($state);
                     $sinceProgress = 0;
-                }
-
-                if ($stopAtFirstLog && $fetched['logs'] !== []) {
-                    return new EvmLogScanResult(EvmLogScanResult::STATUS_FIRST_ACTIVITY, $state, $gaps, $chunks);
                 }
 
                 continue;

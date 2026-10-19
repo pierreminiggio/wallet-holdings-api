@@ -56,30 +56,6 @@ function bruteForceEndBlock(array $timestamps, int $endOfDay, int $start = 0): ?
     return $answer;
 }
 
-/** In-memory stand-in for the DB repository (its constructor, which needs a DatabaseFetcher, is skipped). */
-final class MemoryBlockRepository extends EvmBlockByDateRepository
-{
-    public array $rows = [];
-
-    public int $finds = 0;
-
-    public function __construct()
-    {
-    }
-
-    public function find(string $chain, string $date): ?int
-    {
-        $this->finds++;
-
-        return $this->rows["{$chain}|{$date}"] ?? null;
-    }
-
-    public function store(string $chain, string $date, int $endBlock): void
-    {
-        $this->rows["{$chain}|{$date}"] = $endBlock;
-    }
-}
-
 const DAY = 86400;
 const JAN_1_2024 = 1704067200; // 2024-01-01 00:00:00 UTC
 
