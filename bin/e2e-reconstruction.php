@@ -6,7 +6,7 @@
  * writes real rows to multichain_holdings_cache and the cursor tables (it uses config.php's database).
  *
  *   php bin/e2e-reconstruction.php --date=2026-09-30 [--wallet=0x...] [--interrupt-after=600] [--interrupts=1]
- *                                  [--config=config.php] [--skip-checks]
+ *                                  [--expect=before_genesis] [--config=config.php] [--skip-checks]
  *
  * What it does:
  *   1. runs the reconstruction service for --date from whatever state the database is in (an empty cursor for
@@ -17,6 +17,11 @@
  *   3. checks the stored rows against the section 5 reference values (only those at or before --date),
  *      the live row of 2026-07-19 against its reconstructed neighbours (when all three exist), and the integrity
  *      of the database state: one row per day with no gap, no duplicate reconstructed row, cursors at the date.
+ *
+ * ALWAYS RUN IT FOR ALL FOUR CHAINS: the rows it writes are real rows of your cache, and an existing row is never
+ * overwritten, so a run restricted to some chains would leave days permanently incomplete. Climb with growing
+ * dates instead (a later date resumes from the cursor): see the suggested ladder in the delivery 6 reply / README.
+ * --expect=before_genesis asserts the 400 case (a date before the wallet's first activity) instead of a walk.
  *
  * It can run for HOURS on a fresh wallet with keyless providers (that is the cost of the feature, not a bug);
  * progress is printed. Re-running it is always safe and resumes. Exit code 0 = everything as expected.
@@ -174,6 +179,13 @@ for ($round = 1; $round <= $maxRounds; $round++) {
     sleep($delay);
 }
 
+if (($options['expect'] ?? null) === 'before_genesis') {
+    $ok = $outcome !== null && $outcome->getStatus() === Outcome::STATUS_BEFORE_GENESIS;
+    echo ($ok ? "PASS" : "FAIL") . "  expected before_genesis, got " . ($outcome?->getStatus() ?? 'no outcome') . "\n";
+    echo "  rows written for this wallet by this run: " . count($fetcher->query($fetcher->createQuery('multichain_holdings_cache')->select('as_of_date')->where('address = :address AND source = :source'), ['address' => strtolower($wallet), 'source' => 'reconstructed'])) . " reconstructed row(s) in total\n";
+    exit($ok ? 0 : 1);
+}
+
 if ($outcome === null || $outcome->getStatus() !== Outcome::STATUS_FOUND) {
     echo "\nFAIL  the reconstruction did not complete: " . ($outcome?->getStatus() ?? 'no outcome') . "\n";
     exit(1);
@@ -307,6 +319,61 @@ foreach ($references as $referenceDate => $assert) {
 
     $holdings = holdingsOf($cache, $wallet, $referenceDate);
     $report("reference-{$referenceDate}", $holdings === null ? ["no row for {$referenceDate}: the walk should have written one"] : array_values($assert($holdings)));
+}
+
+// Polygon native USDC, day by day: 18.99304 held before the scan start, then the 12 known transfers (section 5 + the zero-net
+// pair the scanner found). The expected balance at each day's end block is computed independently of the row.
+$usdcTransfers = [
+    [80406376, '-17.990703'], [80511190, '53.709343'], [80511229, '-54.61168'], [80512567, '160.964707'],
+    [80512690, '-161.064707'], [80526467, '243.550038'], [80526491, '-243.550038'], [80636033, '235.168996'],
+    [80636107, '-175.168996'], [80636216, '-58.955012'], [80745841, '60.001012'], [80745873, '-61.046'],
+];
+$micro = static function (string $amount): int {
+    $negative = str_starts_with($amount, '-');
+    [$whole, $fraction] = array_pad(explode('.', ltrim($amount, '-'), 2), 2, '');
+    $value = (int) $whole * 1000000 + (int) str_pad(substr($fraction, 0, 6), 6, '0');
+
+    return $negative ? -$value : $value;
+};
+$fromMicro = static function (int $value): string {
+    $text = intdiv(abs($value), 1000000) . '.' . str_pad((string) (abs($value) % 1000000), 6, '0', STR_PAD_LEFT);
+
+    return ($value < 0 ? '-' : '') . (rtrim(rtrim($text, '0'), '.') ?: '0');
+};
+
+if ($date < '2025-12-16') {
+    echo "SKIP  polygon-native-usdc-day-by-day (the requested date is before Polygon's scan start, 2025-12-16)\n";
+} else {
+    $blockRepository = new EvmBlockByDateRepository($fetcher);
+    $problems = [];
+
+    for ($d = '2025-12-16'; $d <= min($date, '2026-01-05'); $d = gmdate('Y-m-d', strtotime($d . ' +1 day'))) {
+        $endBlock = $blockRepository->find('polygon', $d);
+        $holdings = holdingsOf($cache, $wallet, $d);
+
+        if ($endBlock === null || $holdings === null) {
+            $problems[] = "{$d}: no end block or no row";
+
+            continue;
+        }
+
+        $total = $micro('18.99304');
+
+        foreach ($usdcTransfers as [$block, $amount]) {
+            if ($block <= $endBlock) {
+                $total += $micro($amount);
+            }
+        }
+
+        $expected = $fromMicro($total);
+        $actual = tokenAmount($holdings['polygon'] ?? null, '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359') ?? '0';
+
+        if ($actual !== $expected) {
+            $problems[] = "{$d} (end block {$endBlock}): native USDC {$actual} != {$expected}";
+        }
+    }
+
+    $report('polygon-native-usdc-day-by-day', array_slice($problems, 0, 10));
 }
 
 // The live row of 2026-07-19 must sit between the reconstructed rows around it (accrued interest only moves up).
