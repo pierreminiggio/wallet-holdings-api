@@ -60,7 +60,7 @@ final class MemoryCacheRepository extends HoldingsNowCacheRepository
             }
         }
 
-        return $latest === null ? null : ['responseJson' => $latest['json'], 'cachedAt' => $latest['cachedAt']];
+        return $latest === null ? null : ['responseJson' => $latest['json'], 'cachedAt' => $latest['cachedAt'], 'source' => $latest['source']];
     }
 
     public function store(string $address, string $responseJson, string $asOfDate, string $source): void

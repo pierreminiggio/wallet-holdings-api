@@ -9,20 +9,19 @@ already hit and fixed, and concrete regression-test checklists with real validat
 
 ## Endpoints
 
-* `GET /holdings/{address}` - Cached historical holdings for this address, as of today (UTC).
-* `GET /holdings/{address}?date=YYYY-MM-DD` - Cached historical holdings as of the given UTC day.
-  **This is a pure cache lookup, not a live computation** — it never calls Zerion or does any
-  on-chain reads itself, only reads back a past `/holdings-now` response for this address
-  (`compound`/`aave` DeFi positions included, same shape as `/holdings-now` itself), if
-  `/holdings-now` happened to be called for this address on the exact requested UTC date. Since
-  every `/holdings-now` call is cached as its own row (not overwriting the previous one), this
-  genuinely covers any date this address was ever fetched on — coverage depends entirely on how
-  often `/holdings-now` gets called for it, not on some fixed lookback window. A `404` means
-  `/holdings-now` was never called for this address on that exact date. There is currently no
-  historical reconstruction for dates that were never cached this way — an earlier
-  transaction-replay approach (walking each network's full history to derive a past balance)
-  was built, found to have real correctness problems, and has been removed; see `AGENTS.md` for
-  what was learned if reconstruction is attempted again with a different approach later.
+* `GET /holdings/{address}` - Holdings for this address as of today (UTC): served from the cache, or
+  by `/holdings-now` when nothing is cached yet today.
+* `GET /holdings/{address}?date=YYYY-MM-DD` - Holdings as of the **end of the given UTC day**, same shape as
+  `/holdings-now` (`compound`/`aave` DeFi positions included). If a row for that exact date already exists
+  (cached by a `/holdings-now` call that day, or written by an earlier reconstruction) it is returned as-is, no
+  RPC call at all. Otherwise, for a **past** date, the **multichain historical reconstruction** runs on
+  Ethereum, Base, Polygon and BNB Smart Chain: see "Multichain historical reconstruction" below. **A first
+  request for an old date can take hours**, and may be cut off by your web server or a proxy: progress is saved
+  after every day, so retrying the same request resumes where it stopped. The `source` field says where the row
+  comes from: `multichain_cache` (a live `/holdings-now` snapshot) or `reconstructed`. A future date is a `400`.
+  Status codes: `200`, `400` (invalid input, or no activity at all on any supported chain by that date), `409`
+  (another reconstruction holds the same RPC providers; has `Retry-After`; retry), `500`, `502` (an RPC provider
+  failed; progress saved; retry).
 * `GET /holdings-now/{address}` - **Current** holdings and DeFi positions right now, powered by
   Zerion's portfolio API. Covers 60+ chains simultaneously (Ethereum, Base, Polygon, BNB, Avalanche
   and more) in two calls — wallet tokens/native coins in one, DeFi protocol positions in the other.
@@ -113,10 +112,9 @@ GET /holdings/0x1234567890123456789012345678901234567890?date=2026-06-15
 }
 ```
 
-This only returns data if `/holdings-now` for this address was called on exactly 2026-06-15
-(UTC) — any date on which it was called works (the cache is append-only, one row per call, not
-just the latest), but a date on which it was never called returns a `404` instead, since there's
-no reconstruction to fall back on. See the `/holdings` bullet above.
+A date on which `/holdings-now` was called for this address is returned from that cached row (`source`:
+`multichain_cache`); any other past date is reconstructed (`source`: `reconstructed`). See the `/holdings`
+bullet above and "Multichain historical reconstruction" below.
 
 ## Why `bcmath` isn't needed anywhere in this project
 
@@ -149,22 +147,86 @@ Blockscout silently returning a "not yet indexed" status that the code didn't di
 source at all (Polygon and BNB Smart Chain were never confirmed against a live API despite
 looking supported on paper). Rather than keep partially-working reconstruction code and its three
 supporting database tables (`wallet_sync`, `wallet_native_event`, `wallet_token_event`) around,
-all of it — the classes, and the tables — has been removed. `/holdings` is now a pure cache
-lookup (see the Endpoints section above): it only ever returns what a prior `/holdings-now` call
-already cached for that exact address and UTC date, and returns a clean `404` otherwise, rather
-than attempting a reconstruction that couldn't be fully trusted.
+all of it — the classes, and the tables — has been removed. For a while `/holdings` was a pure
+cache lookup with a clean `404` for any other date. It has since gained a different, much more
+heavily validated reconstruction (EVM archive RPC reads and event logs, not a block explorer's
+transaction history): see "Multichain historical reconstruction" below.
 
 If historical reconstruction is revisited later with a different approach, `AGENTS.md` has a
 concise summary of the specific, hard-won lessons from this attempt (the Blockscout indexing-
 status bug in particular) worth not re-learning from scratch.
 
-## Multichain historical reconstruction (in progress)
+## Multichain historical reconstruction
 
-`/holdings/{address}?date=` is still a pure cache lookup. Its reconstruction for Ethereum, Base,
-Polygon and BSC is being built delivery by delivery from `MULTICHAIN-RECONSTRUCTION-PLAN.md`
-(the plan is the source of truth; `/holdings` behavior does not change until delivery 6).
+`GET /holdings/{address}?date=YYYY-MM-DD` reconstructs, for a **past** date with no cached row, what the wallet
+held at the **end of that UTC day** on **Ethereum, Base, Polygon and BNB Smart Chain** (Avalanche and Gnosis are
+not reconstructed: every reconstructed row has an empty `avalanche` and `xdai` entry with
+`"reconstruction_supported": false`). It is built from `MULTICHAIN-RECONSTRUCTION-PLAN.md` (the source of truth for
+decisions, reference values and per-delivery notes) on top of the techniques validated in
+`MULTICHAIN-HOLDINGS.md`.
 
-**Delivery 1 (foundations) is in place, with no behavior change for existing endpoints:**
+**How it works.** There is no background job: the request itself does the work. For each chain it finds the
+wallet's first activity (first ERC-20 Transfer touching it, or the native-coin genesis), then walks forward one
+day at a time: it scans `eth_getLogs` Transfer events to discover every token the wallet ever touched, then reads
+the native balance, `balanceOf` of every discovered token, and the Compound III / Aave V3 positions **at that
+day's last block**, and writes one `multichain_holdings_cache` row per day (`source = 'reconstructed'`). So the
+first request for an old date is slow (hours for several years), and every later request inside the walked range
+is an instant cache hit. A cursor per (address, chain) makes the walk resumable: it advances only after a day's
+row is written, so a cut-off request loses at most the day in progress, and retrying resumes.
+
+**What you get**: the same per-chain shape as `/holdings-now` (`native`, `tokens`, `defi.compound/aave/other`),
+with these differences: `defi.other` is always `[]` (it comes from Zerion, which has no history); each Aave reserve
+has `usedAsCollateral: null` (the only source for it is not reliable historically); a chain with nothing on that day
+is omitted from the row; a token held only for part of the history appears only on the days it was held; and a
+`reconstruction.skipped_tokens` key lists contracts that could not be read as ERC-20s (spam, broken contracts).
+Existing rows always win: a day that already has a row (for instance from a `/holdings-now` call) is never
+overwritten.
+
+**Known limits.** Tokens received before a chain's scan start (Polygon: block 80,406,107) and never touched again
+are not discovered. A native-only wallet whose funds came and went entirely between two coarse samples (500,000
+blocks) and left no token log is not seen. A handful of blocks that free-tier providers cannot serve even alone are
+known holes (`EvmReconstructionChains::SKIPPED_BLOCKS`, and the unresolved-block table below): a third-party token
+transfer *to* the wallet inside one is missed if that token appears nowhere else. NFTs are ignored. The skipped
+blocks were found on one wallet: re-check a listed block the first time another wallet's scan reaches it.
+
+**Operating it.**
+- **Providers.** Ethereum, Base and Polygon have keyless `drpc.org` defaults (archive reads and `eth_getLogs`).
+  **BNB Smart Chain has no keyless archive provider: add a free NodeReal URL under `reconstruction.rpc` in
+  `config.php`**, otherwise every reconstruction fails with a `502` that names the missing chain (a silently skipped
+  chain would be wrong data). Per chain you can configure several providers in priority order; they are used as
+  failover. Keyless providers are rate limited and cap `eth_getLogs` to about 101 blocks on Ethereum and Polygon:
+  the scanner adapts, but a multi-year first request is long. A keyed provider is much faster.
+- **Locks.** One `flock` file per (chain, provider) in `reconstruction.lock_directory` (writable by the web server,
+  outside the web root; defaults to a directory under the system temp dir). A second reconstruction that needs a
+  lock already held gets a `409` with `Retry-After`. The OS releases a lock if the process dies. This assumes a
+  **single web server**.
+- **Timeouts.** The service calls `ignore_user_abort(true)` and `set_time_limit(0)`, but a web server, PHP-FPM
+  (`request_terminate_timeout`) or a proxy may still cut a request that runs for hours. That is safe: every walked day
+  is persisted and a retry resumes. For a very old date, consider warming the cache with a first request for a recent
+  date from a command line client with no timeout, then asking for the older one.
+- **Unresolved blocks.** When the scanner cannot fetch a block even alone it records it in
+  `multichain_reconstruction_unresolved_block` and moves on (only after proving the failure is specific to that block).
+  Review those rows on a block explorer and promote acceptable ones into `EvmReconstructionChains::SKIPPED_BLOCKS`.
+- **Tables to create** (migration block below): `evm_block_by_date`, `multichain_reconstruction_unresolved_block`,
+  `multichain_reconstruction_cursor`.
+
+**Checks** (each delivery has a script that runs against real RPCs, plus offline tests):
+
+```
+php tests/run.php              # offline unit and integration tests (also passes with: php -n tests/run.php)
+php bin/check-1-reads.php      # Compound/Aave reads at a historical block
+php bin/check-2-blocks.php     # date -> end block resolver
+php bin/check-3-scan.php       # log scanner (add --long for the 340k-block Polygon window)
+php bin/check-4-snapshot.php   # snapshot builder: balances, Compound/Aave, native genesis
+php bin/check-5-service.php    # the service end to end on Polygon, in-memory repositories
+php bin/e2e-reconstruction.php # the real thing: your database, your providers, a real wallet (see its header)
+```
+
+### How it is built
+
+`/holdings` behavior was unchanged until the last delivery; these are the components, in the order they were built.
+
+**Delivery 1 (foundations), no behavior change for the existing endpoints:**
 
 - `EvmRpcClient` takes an optional block on `ethCall` (default `latest`, unchanged) and gained
   `getBalance`, `getLogs`, `blockNumber`, `getBlockByNumber`, `getCode`/`hasCodeAt`. Responses
@@ -183,16 +245,15 @@ Polygon and BSC is being built delivery by delivery from `MULTICHAIN-RECONSTRUCT
   RPC providers per chain and the lock directory. Ethereum/Base/Polygon have keyless drpc.org
   defaults; **BSC needs a (free) NodeReal URL**. No database change in this delivery.
 
-**Delivery 2 (date to block) is in place:** `EvmBlockResolver` finds a day's end block by searching block
+**Delivery 2 (date to block):** `EvmBlockResolver` finds a day's end block by searching block
 timestamps (interpolation and bisection steps alternating, so a few reads on regular chains and at most
 about twice a bisection on irregular ones), bounded below by the chain's history start, over the chain's
 providers in priority order (a provider failing or lagging is skipped; the head used is the highest any
 provider reports). It returns one of four outcomes (`EvmBlockResolution`): resolved, before history
 start, day not complete, error. `EvmBlockByDateRepository` caches resolved days in the new
-`evm_block_by_date` table, see the migration block below (**run it before delivery 5 needs it; nothing
-reads it yet**).
+`evm_block_by_date` table, see the migration block below (create it with the migration block below).
 
-**Delivery 3 (log scanner) is in place:** `EvmLogScanner` discovers the ERC-20 contracts a wallet ever touched by
+**Delivery 3 (log scanner):** `EvmLogScanner` discovers the ERC-20 contracts a wallet ever touched by
 scanning `eth_getLogs` Transfer events in both directions, in adaptive resumable chunks. A range cap shrinks the
 chunk immediately (no backoff) and the scanner converges on the cap instead of re-probing it; a transient error
 (rate limit, `Request timeout on the free plan`, empty or malformed body) is retried on the same range with the
@@ -201,10 +262,9 @@ block; skipped blocks (`EvmReconstructionChains`) are never requested; a block t
 recorded (table below) and skipped, but only after proving the failure is block-specific. The state
 (`EvmLogScanState`: last scanned block, step size, tokens, first activity block) only moves past a chunk once all
 its calls succeeded, and serialises to the cursor columns, so an interrupted scan resumes with no hole. Only
-3-topic Transfers (ERC-20 shape) count: NFT-shaped Transfers (4 topics) are ignored by design. **Nothing calls the scanner yet** (delivery 5), and the unresolved-block table can be
-created now.
+3-topic Transfers (ERC-20 shape) count: NFT-shaped Transfers (4 topics) are ignored by design. The unresolved-block table is in the migration block below.
 
-**Delivery 4 (snapshot builder) is in place:** `EvmHoldingsSnapshotBuilder::snapshot($address, $chain, $block, $tokens)`
+**Delivery 4 (snapshot builder):** `EvmHoldingsSnapshotBuilder::snapshot($address, $chain, $block, $tokens)`
 returns one chain's holdings at one block in the same shape as `/holdings-now` (`native`, `tokens`,
 `defi: {compound, aave, other}`); `other` is always `[]` in a reconstruction. Native comes from `eth_getBalance`
 (symbols ETH / ETH / POL / BNB for Ethereum / Base / Polygon / BSC), every discovered token from `balanceOf` at
@@ -214,9 +274,9 @@ partial success: any read that cannot be trusted makes the whole snapshot fail (
 The one exception is a token contract that cannot be read as an ERC-20 (reverts, no `balanceOf`/`decimals`,
 empty answer from a contract that has code): spam and broken contracts are routine among discovered tokens, so it
 is skipped and reported (`getSkippedTokens()`), not retried and not an outage. `unsupportedChainShape()` gives the
-empty shape with `"reconstruction_supported": false` for `avalanche` / `xdai`. Nothing calls it yet (delivery 5).
+empty shape with `"reconstruction_supported": false` for `avalanche` / `xdai`.
 
-**Delivery 5 (cursor, lock, reconstruction service) is in place, still not wired to any endpoint:**
+**Delivery 5 (cursor, lock, reconstruction service):**
 `MultichainHoldingsReconstructionService::reconstruct($address, $date)` walks day by day from the wallet's first
 activity (or from the cursor) to a past date, writing one `reconstructed` row per day and advancing the cursors only
 after the row. It returns a `MultichainReconstructionOutcome`: `found` (200) / `before_genesis` (400) /
@@ -257,8 +317,13 @@ php bin/check-5-service.php  # delivery 5 acceptance (Polygon walk with in-memor
    `defi` key). This step can be skipped entirely -- the defaults work out of the box -- unless
    you want your own provider (Alchemy/Infura/QuickNode) for a specific chain, e.g. because the
    public default is rate-limiting you.
-6. Run the migration below on your database
-7. Point your webserver's document root to `public/`, or use the provided `.htaccess` with Apache
+6. (Required for `/holdings` on a past date that was never cached) Configure the `reconstruction`
+   section of `config.php`: **a free NodeReal URL for BNB Smart Chain** (it has no keyless archive provider,
+   and a reconstruction fails loudly without it), optionally keyed providers for the other chains (faster
+   than the keyless `drpc.org` defaults), and a writable `lock_directory` outside the web root. See
+   "Multichain historical reconstruction" above.
+7. Run the migration below on your database (it includes the three reconstruction tables)
+8. Point your webserver's document root to `public/`, or use the provided `.htaccess` with Apache
 
 ## Migration
 
@@ -430,10 +495,11 @@ the single most recent fetch; see `AGENTS.md` Part 3 for the full history of tha
 including an intermediate two-source design (this table plus a `zerion_position`-based fallback)
 that was tried and rejected before landing here.
 
-`/holdings?date=...` reads this table (`HoldingsNowCacheRepository::getCacheForDate()`) and only
-this table -- there is no separate Zerion-level cache anymore. It returns a hit for any date on
-which `/holdings-now` actually happened to be called for that specific address, and a `404`
-otherwise; there is still no reconstruction for a date that was simply never fetched.
+`/holdings?date=...` reads this table (`HoldingsNowCacheRepository::getCacheForDate()`, which also returns
+the row's `source`) and only this table -- there is no separate Zerion-level cache anymore. A hit is
+returned as-is whatever its source (`live`, from a `/holdings-now` call, or `reconstructed`, written by the
+historical reconstruction); a miss for a past date runs the reconstruction, which writes one `reconstructed`
+row per day it walks.
 
 `sui_holdings_cache` is deliberately append-only: `address` is **not** unique, and every
 fresh fetch for `/sui-holdings-now/{address}` inserts a new row rather than overwriting

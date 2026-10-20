@@ -77,14 +77,15 @@ class HoldingsNowCacheRepository
      * given address+date, but the most recent by cached_at is still picked among same-day
      * rows for robustness, same reasoning as SuiHoldingsCacheRepository::getCacheForDate().
      *
-     * @return array{responseJson: string, cachedAt: int}|null
+     * @return array{responseJson: string, cachedAt: int, source: string}|null `source` is the row's own source
+     *         column: 'live' (a /holdings-now call) or 'reconstructed' (the historical reconstruction).
      */
     public function getCacheForDate(string $address, string $date): ?array
     {
         $rows = $this->fetcher->query(
             $this->fetcher
                 ->createQuery(self::TABLE)
-                ->select('response_json, cached_at')
+                ->select('response_json, cached_at, source')
                 ->where('address = :address AND as_of_date = :as_of_date')
             ,
             ['address' => strtolower($address), 'as_of_date' => $date]
@@ -96,7 +97,7 @@ class HoldingsNowCacheRepository
             $cachedAt = (int) $row['cached_at'];
 
             if ($latest === null || $cachedAt > $latest['cachedAt']) {
-                $latest = ['responseJson' => $row['response_json'], 'cachedAt' => $cachedAt];
+                $latest = ['responseJson' => $row['response_json'], 'cachedAt' => $cachedAt, 'source' => (string) $row['source']];
             }
         }
 
@@ -109,10 +110,9 @@ class HoldingsNowCacheRepository
      *                         live snapshots -- but tracked as its own column (not derived
      *                         from cached_at) for the same reason as sui_holdings_cache, in
      *                         case a backfilled source is ever added later.
-     * @param string $source  'live' currently -- the only source that writes to this table.
-     *                        Kept as an explicit parameter (rather than hardcoded) to mirror
-     *                        SuiHoldingsCacheRepository::store()'s signature, in case a second
-     *                        source is introduced later the way SUI's 'reconstructed' was.
+     * @param string $source  'live' (a /holdings-now call) or 'reconstructed' (the multichain historical
+     *                        reconstruction, MultichainHoldingsReconstructionService). Same two values as
+     *                        sui_holdings_cache's source column.
      */
     public function store(string $address, string $responseJson, string $asOfDate, string $source): void
     {

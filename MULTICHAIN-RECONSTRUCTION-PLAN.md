@@ -6,7 +6,7 @@ and record deviations here. The blueprint and every verified finding it relies o
 [`MULTICHAIN-HOLDINGS.md`](MULTICHAIN-HOLDINGS.md) (all pre-build items there are closed or
 explicitly scoped out); project conventions live in [`AGENTS.md`](AGENTS.md).
 
-Status: **plan complete and all decisions confirmed (Oct 17 2026); delivery 1 accepted on real RPCs (Oct 18 2026), delivery 2 accepted, delivery 3 accepted (short checks; the 340k-block `--long` window not run yet), delivery 4 accepted, delivery 5 shipped, next: delivery 6.**
+Status: **all six deliveries shipped; `/holdings?date=` is wired to the reconstruction. Remaining: the user's real end-to-end run (`bin/e2e-reconstruction.php`) and the real-RPC check of delivery 5 on the other chains.**
 The build happens in later conversations, one delivery at a time, starting with delivery 1 (see
 section 8 for how to pick the work up).
 
@@ -369,7 +369,7 @@ reference value in section 5 has to be re-read.
 - [x] Delivery 3 — `EvmLogScanner`
 - [x] Delivery 4 — Snapshot builder
 - [x] Delivery 5 — Cursor, lock, reconstruction service
-- [ ] Delivery 6 — Endpoint wiring, docs, end-to-end
+- [x] Delivery 6 — Endpoint wiring, docs, end-to-end
 
 ### Delivery 1 — notes and deviations
 
@@ -494,3 +494,27 @@ reference value in section 5 has to be re-read.
   come from `balanceOf` at the day's block.
 - `bin/check-5-service.php` runs the real service on Polygon only, with in-memory repositories (no database), against real RPCs.
   Not covered there, left to delivery 6's end-to-end: Ethereum/Base/BSC walks, a real database, the HTTP layer.
+
+### Delivery 6 — notes and deviations
+
+- `GET /holdings/{address}?date=`: a cached row is served as-is whatever its source; a miss for a **past** date runs
+  `MultichainHoldingsReconstructionService`; a miss for today still goes through `/holdings-now`.
+- **Response `source`**: `reconstructed` for reconstructed rows; live rows keep `multichain_cache` (the value the endpoint has
+  always returned, so existing clients do not break). `HoldingsNowCacheRepository::getCacheForDate()` now also returns the
+  row's own `source`.
+- **Status mapping** (pure, unit-tested in `HoldingsForDateResponse`): found 200, before_genesis 400, busy 409 + `Retry-After`,
+  provider_error 502 (`detail`, `walked_through`), inconsistent and storage_error 500 (detail logged, never sent to the client).
+- **Behavior changes for existing callers**: a past date that has no cached row no longer returns `404`, it is reconstructed
+  (that is the feature). A **future** date, which used to be a `404`, is now a `400` ("date cannot be in the future").
+- Reconstructed rows may carry a top-level `reconstruction.skipped_tokens` key; it is passed through in the response.
+- OpenAPI updated (description, `409`/`500`/`502`, `ReconstructionError`, `source` enum, notes on reconstructed rows); the `404`
+  of this path was removed. All `$ref`s were checked to resolve.
+- README (overview, operating notes, setup step, migration), `AGENTS.md` (header and Part 3 status) and a status banner on
+  `MULTICHAIN-HOLDINGS.md` were brought in line with what exists.
+- `bin/e2e-reconstruction.php`: uses the real database and providers from `config.php`; optional kill-and-resume of a child
+  process (`--interrupt-after`); checks the section 5 references as end-of-day rows, the 2026-07-19 live row against its
+  reconstructed neighbours, one-row-per-day integrity and the cursors. **Not run by the author** (it needs the real database).
+- **Cost warning, unchanged from the risks list**: a first request for an old date on a multi-year wallet makes thousands of RPC
+  calls per chain per year of history with keyless providers; hours is the expected order. Skipping Aave reserve reads when
+  `getUserAccountData` shows zero was considered and rejected: that figure counts only reserves enabled as collateral, so a
+  supplied-but-not-collateral position would be silently dropped.

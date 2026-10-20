@@ -204,7 +204,7 @@ class MultichainHoldingsReconstructionService
             return MultichainReconstructionOutcome::inconsistent("The walk is complete through {$date} but no cache row exists for it");
         }
 
-        return MultichainReconstructionOutcome::found($row['responseJson']);
+        return MultichainReconstructionOutcome::found($row['responseJson'], $row['source']);
     }
 
     /**

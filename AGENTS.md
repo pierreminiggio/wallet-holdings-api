@@ -7,22 +7,30 @@ what you're touching — they don't share code or assumptions, beyond both livin
    — see "Part 1" below.
 2. **`/holdings-now`'s on-chain `defi` enrichment** (Compound III + Aave V3, read directly from
    their contracts, no third-party API) — see "Part 2", further down.
-3. **`/holdings`'s cache-only historical lookup**, and lessons from the historical
-   reconstruction system that used to power it before it was removed — see "Part 3", at the end.
+3. **`/holdings`'s historical lookup** (cache first, then the multichain reconstruction), and lessons from the
+   transaction-replay reconstruction system that used to power it before it was removed — see "Part 3", at the end.
 
-**Extending historical reconstruction to EVM chains (multichain `/holdings`) is in progress.**
-Before writing any code for this, read `MULTICHAIN-HOLDINGS.md` in the repo root — it tracks
-every technique validated against a real wallet so far (per-chain RPC providers, genesis
-discovery methods, token-balance correctness pitfalls, Compound/Aave historical read
-constraints) and, just as importantly, what's still unresolved. Per that document's own rule:
-no implementation work starts until it has no unresolved items left.
+**Historical reconstruction for EVM chains (multichain `/holdings`) is built and live.** On a cache miss for a
+past date, `/holdings/{address}?date=` runs `MultichainHoldingsReconstructionService` (Ethereum, Base, Polygon, BNB
+Smart Chain), which walks the wallet's history day by day and writes one `reconstructed` row per day. The single
+source of truth for decisions, deliveries, reference values and known limits is
+`MULTICHAIN-RECONSTRUCTION-PLAN.md`; `MULTICHAIN-HOLDINGS.md` is the record of the pre-build testing (every technique
+was validated against a real wallet first, and its mistakes are written down so they are not repeated). `README.md`
+("Multichain historical reconstruction") is the operator's view.
 
-**Build status:** the pre-build items are closed and the build follows
-`MULTICHAIN-RECONSTRUCTION-PLAN.md` (single source of truth, see its section 9 for which
-deliveries have shipped). Delivery 1 added a block parameter to `EvmRpcClient::ethCall` and to the
-Compound/Aave clients; for `"latest"` they behave exactly as described in Part 2. Two rules from it
-worth knowing before touching those files: `new EvmRpcClient()` per call defeats the `eth_getCode`
-memo (the clients reuse one per URL on purpose), and a historical `"0x"` is never to be read as zero.
+Rules that exist because something broke, worth knowing before touching this code:
+- A response is valid only if it is a well-formed JSON-RPC object with `result` or `error`. An empty or malformed body
+  is a **failure**, never an empty success (`EvmRpcClient`); a historical `eth_call` returning `0x` is an error, never
+  a zero. Absence of a contract is proven with `eth_getCode` (`hasCodeAt`), never inferred.
+- Error classes decide the reaction: range cap (shrink at once, no backoff), transient (back off, same input), auth
+  (provider unusable), revert (the contract's own answer, never retried). Do not collapse them.
+- Balances always come from `balanceOf` at the day's block, never from summed Transfer deltas; logs are discovery only.
+- A cursor never advances past a day whose row is not written. An existing row for a day is never overwritten.
+  A snapshot that cannot be fully built fails the day; there is no partial row.
+- `new EvmRpcClient()` per call defeats the `eth_getCode` memo (the Compound/Aave clients reuse one per URL on purpose).
+- Each delivery has a `bin/check-N-*.php` script that runs against real RPCs, and `tests/run.php` runs offline with
+  no composer, no PHPUnit and no network (`php -n tests/run.php` too).
+
 
 ---
 
@@ -502,11 +510,14 @@ this was fully exercised, not just code-reviewed):
 
 ---
 
-# Part 3 — `/holdings` (historical) is now a pure cache lookup
+# Part 3 — `/holdings` (historical): cache first, then the multichain reconstruction (and the lessons of the removed tx-replay system)
 
 This part is for an AI agent (or a human moving fast) picking up work on `GET
-/holdings/{address}?date=YYYY-MM-DD` later — including anyone asked to reintroduce historical
-reconstruction for it. Read this before touching the `/holdings` block in `App::run()`.
+/holdings/{address}?date=YYYY-MM-DD` later. **Status update:** what follows describes the state after the removal of
+the transaction-replay system, when `/holdings` was a pure cache lookup that answered `404` for an uncached date.
+That is no longer the case: a past-date miss now runs the multichain reconstruction (see the top of this file and
+`README.md`), and `404` is no longer returned for such a date. The lessons below (and the rejected designs) still
+apply to anything that touches this endpoint. Read this before touching the `/holdings` block in `App::run()`.
 
 ## What it does now, in one paragraph
 
@@ -519,8 +530,8 @@ lessons below. `/holdings` is now a pure cache lookup with no live computation a
 single source: `HoldingsNowCacheRepository::getCacheForDate()` — the full `/holdings-now`
 response cache, including the `{compound, aave, other}` `defi` split, same as `/holdings-now`
 itself, and genuinely covering any date `/holdings-now` was ever called for that address (the
-cache is append-only — see bug #6 in Part 2 — not just the latest fetch). A miss returns a
-`404`. This also means `bcmath` is no longer used anywhere in this project (see bug #2 in Part
+cache is append-only — see bug #6 in Part 2 — not just the latest fetch). (At that time a miss returned a
+`404`; today a past-date miss is reconstructed, see above.) This also means `bcmath` is no longer used anywhere in this project (see bug #2 in Part
 2, and "Why bcmath isn't needed anywhere in this project" in `README.md`) — the only two things
 that ever needed it are both gone now (the reconstruction system, and `AbiCodec`'s original
 `bcmath`-based implementation, separately rewritten — see Part 2).

@@ -28,12 +28,17 @@ final class MultichainReconstructionOutcome
         private ?string $message = null,
         private ?int $retryAfterSeconds = null,
         private ?string $walkedThrough = null,
+        private ?string $source = null,
     ) {
     }
 
-    public static function found(string $responseJson): self
+    /**
+     * @param string $source the cache row's source ('reconstructed', or 'live' if a live row for that date
+     *                       appeared while the walk was running and so won)
+     */
+    public static function found(string $responseJson, string $source = 'reconstructed'): self
     {
-        return new self(self::STATUS_FOUND, $responseJson);
+        return new self(self::STATUS_FOUND, $responseJson, null, null, null, $source);
     }
 
     public static function beforeGenesis(string $message): self
@@ -69,6 +74,12 @@ final class MultichainReconstructionOutcome
     public function isFound(): bool
     {
         return $this->status === self::STATUS_FOUND;
+    }
+
+    /** For FOUND: the source of the row that is returned. */
+    public function getSource(): ?string
+    {
+        return $this->source;
     }
 
     public function getResponseJson(): ?string

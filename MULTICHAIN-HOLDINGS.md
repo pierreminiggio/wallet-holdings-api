@@ -5,7 +5,14 @@ reconstruction feature (currently SUI-only — see the SUI section of `AGENTS.md
 native balances, ERC-20 token holdings, and Compound/Aave positions, for **both** current-state
 tracking and arbitrary-past-date reconstruction.
 
-**No implementation has started.** Every technique below was proven against a real wallet with real,
+> **Status (Oct 2026): this is the record of the pre-build testing, and the feature it validated is built and live**
+> (`GET /holdings/{address}?date=` reconstructs a past date on Ethereum, Base, Polygon and BNB Smart Chain).
+> Read `MULTICHAIN-RECONSTRUCTION-PLAN.md` for what was actually built, the decisions, the deviations from this
+> document and the reference values, and `README.md` for how to operate it. Statements below such as "no
+> implementation has started" or "the plan" describe the state at the time of writing. Where this document
+> and the plan differ, the plan wins.
+
+**No implementation had started when this was written.** Every technique below was proven against a real wallet with real,
 multi-chain, multi-year history before any code gets written, following the discipline that made the
 SUI reconstruction reliable. Several "obvious" first approaches turned out wrong or incomplete —
 those mistakes are recorded here, with how they were caught, so they aren't repeated.

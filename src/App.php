@@ -78,25 +78,23 @@ class App
         $config = $this->loadConfig();
         $fetcher = $this->createDatabaseFetcher($config);
 
-        // This endpoint is a pure cache lookup: it returns whatever a prior /holdings-now
-        // call for this address already cached, and nothing else. There is deliberately no
-        // historical reconstruction here right now -- an earlier transaction-replay approach
-        // (walking each network's full tx history to derive a past balance) was tried and
-        // removed; see AGENTS.md if a reconstruction approach is revisited later.
+        // Single source of truth: multichain_holdings_cache (the full /holdings-now response cache,
+        // including compound/aave), append-only: a new row per /holdings-now call (source 'live'),
+        // and one row per day written by the historical reconstruction (source 'reconstructed').
+        // A cached row for the exact date is served as-is, whatever its source.
         //
-        // Single source: multichain_holdings_cache (the full /holdings-now response cache,
-        // including compound/aave). This table is append-only (a new row per /holdings-now
-        // call, not an overwrite), same as sui_holdings_cache, so this genuinely can serve
-        // any past date -- but only a date on which /holdings-now actually happened to be
-        // called for this specific address; there is still no reconstruction for a date that
-        // was simply never fetched. An earlier version of this endpoint additionally fell
-        // back to zerion_position (Zerion-only position history, since removed entirely) to
-        // cover dates the (at the time, single-row-per-address) multichain cache couldn't.
-        // That fallback was removed because its data never included compound/aave positions,
-        // and those are a hard requirement here, not an optional nice-to-have -- a response
-        // with holdings but silently missing defi positions is worse than a 404. See
-        // HoldingsNowCacheRepository's class docblock and AGENTS.md Part 3 for more.
-        $multichainCache = (new HoldingsNowCacheRepository($fetcher))->getCacheForDate($address, $targetDate);
+        // On a MISS for a PAST date, the multichain historical reconstruction runs
+        // (MultichainHoldingsReconstructionService): it walks the wallet's history day by day on
+        // Ethereum, Base, Polygon and BNB Smart Chain, writes one row per day it walks (so any later
+        // request inside that range is a pure cache hit), and resumes from a cursor if a previous
+        // request was cut off. A first request for an old date can take hours: the caller is expected
+        // to retry on 502/409 (see HoldingsForDateResponse for the status mapping). This replaced an
+        // earlier transaction-replay approach that was tried and removed (see AGENTS.md).
+        //
+        // Today's date is never reconstructed: a miss for today goes through /holdings-now. A future
+        // date can never exist, so it is a 400.
+        $holdingsCache = new HoldingsNowCacheRepository($fetcher);
+        $multichainCache = $holdingsCache->getCacheForDate($address, $targetDate);
 
         if ($multichainCache === null) {
             if ($isToday) {
@@ -104,34 +102,70 @@ class App
 
                 return;
             }
-            http_response_code(404);
-            echo json_encode(['message' => 'No cached holdings found for ' . $address . ' on '
-                . $targetDate . '. This endpoint only serves dates on which /holdings-now/'
-                . $address . ' was actually called -- it does not reconstruct historical data '
-                . 'for dates that were never fetched. Call /holdings-now/' . $address . ' to '
-                . "cache today's snapshot for future lookups."]);
+
+            if ($targetDate > $today) {
+                http_response_code(400);
+                echo json_encode(['message' => 'date cannot be in the future']);
+
+                return;
+            }
+
+            $this->handleHoldingsReconstruction($address, $targetDate, $config, $fetcher, $holdingsCache);
 
             return;
         }
 
-        $cachedResponse = json_decode($multichainCache['responseJson'], true);
+        $this->emit(HoldingsForDateResponse::fromCachedRow(
+            $address,
+            $targetDate,
+            $multichainCache['responseJson'],
+            $multichainCache['source']
+        ));
+    }
 
-        $response = [
-            'address' => $address,
-            'date' => $targetDate,
-            'source' => 'multichain_cache',
-            'holdings' => $cachedResponse['holdings'] ?? []
-        ];
+    /**
+     * Runs the historical reconstruction for a past date that has no cached row, and emits the result.
+     * May run for a very long time on a first request for an old date (the service lifts PHP's time
+     * limit and ignores client disconnects); every walked day is persisted as it goes.
+     */
+    private function handleHoldingsReconstruction(
+        string $address,
+        string $targetDate,
+        array $config,
+        DatabaseFetcher $fetcher,
+        HoldingsNowCacheRepository $holdingsCache
+    ): void {
+        try {
+            $service = new MultichainHoldingsReconstructionService(
+                new EvmReconstructionConfig($config),
+                $holdingsCache,
+                new MultichainReconstructionCursorRepository($fetcher),
+                new EvmBlockByDateRepository($fetcher),
+                new EvmUnresolvedBlockRepository($fetcher)
+            );
 
-        // Carry over any partial on-chain read failures from when this was originally
-        // cached (see CompoundHoldingsClient/AaveHoldingsClient's per-chain error
-        // handling) rather than silently dropping that information here.
-        if (! empty($cachedResponse['defi_errors'])) {
-            $response['defi_errors'] = $cachedResponse['defi_errors'];
+            $outcome = $service->reconstruct($address, $targetDate);
+        } catch (\Throwable $e) {
+            // A malformed config, or the database being unreachable: nothing to retry on the client side.
+            error_log('Historical reconstruction could not start: ' . $e->getMessage());
+            $outcome = MultichainReconstructionOutcome::storageError($e->getMessage());
         }
 
-        http_response_code(200);
-        echo json_encode($response);
+        $this->emit(HoldingsForDateResponse::fromOutcome($outcome, $address, $targetDate));
+    }
+
+    /**
+     * @param array{status: int, headers: array<string, string>, body: array<string, mixed>} $response
+     */
+    private function emit(array $response): void
+    {
+        http_response_code($response['status']);
+
+        foreach ($response['headers'] as $name => $value) {
+            header($name . ': ' . $value);
+        }
+
+        echo json_encode($response['body']);
     }
 
     private function handleHoldingsNow(string $address): void
@@ -681,11 +715,12 @@ class App
                 'title' => 'Wallet Holdings API',
                 'description' => 'Live current holdings and DeFi positions for EVM and SUI wallets '
                     . '(/holdings-now, /sui-holdings-now), plus historical lookups for both '
-                    . '(/holdings, /sui-holdings) served from whatever has already been cached by a prior '
-                    . 'live call on that exact date. For EVM wallets, /holdings is currently a pure cache '
-                    . 'lookup with no historical reconstruction: a date not already cached by a prior '
-                    . '/holdings-now call for that address returns a 404, rather than being computed on '
-                    . 'demand. (SUI historical lookups work differently -- see /sui-holdings below -- since '
+                    . '(/holdings, /sui-holdings). For EVM wallets, /holdings serves a cached row for the '
+                    . 'requested UTC date when one exists (a prior /holdings-now call, or an earlier '
+                    . 'reconstruction), and otherwise RECONSTRUCTS the wallet\'s history day by day on Ethereum, '
+                    . 'Base, Polygon and BNB Smart Chain, up to the requested past date. A first request for an '
+                    . 'old date can take hours; it is resumable (retry the same request on 502 or 409). '
+                    . '(SUI historical lookups work differently -- see /sui-holdings below -- since '
                     . 'that side has its own reconstruction mechanism via a separate GitHub Action.)',
                 'version' => '1.0.0'
             ],
@@ -814,13 +849,23 @@ class App
                 ],
                 '/' . self::HOLDINGS_ENDPOINT . '/{address}' => [
                     'get' => [
-                        'summary' => 'Get a wallet\'s cached historical holdings for a given UTC date',
-                        'description' => 'Pure cache lookup, not a live computation: returns whatever a prior '
-                            . '/holdings-now/{address} call for this address already cached (including its '
-                            . 'compound/aave on-chain defi positions), if that call happened to be made on the '
-                            . 'exact requested UTC date. /holdings-now\'s cache keeps a row per call (not just '
-                            . 'the latest), so any date this address was actually fetched on can be looked up '
-                            . 'here -- but there is no reconstruction for a date that was simply never fetched.',
+                        'summary' => 'Get a wallet\'s historical holdings for a given UTC date, reconstructing them if needed',
+                        'description' => 'Returns the holdings as of the END of the requested UTC day. If a row for '
+                            . 'that exact date already exists (cached by a /holdings-now call on that day, or written '
+                            . 'by an earlier reconstruction) it is returned as-is, whatever its source. Otherwise, for '
+                            . 'a past date, the multichain historical reconstruction runs: it finds the wallet\'s '
+                            . 'first activity on Ethereum, Base, Polygon and BNB Smart Chain, then walks forward day by '
+                            . 'day (token discovery from ERC-20 Transfer logs, then native, token, Compound and Aave '
+                            . 'balances read at each day\'s end block), writing one row per day so that any later '
+                            . 'request inside the walked range is an instant cache hit. IT CAN TAKE HOURS for an old '
+                            . 'date on a first request and may be cut off; progress is saved after every day, so '
+                            . 'retrying the same request resumes where it stopped (502), and a 409 only means another '
+                            . 'reconstruction currently holds the same RPC providers (retry after the Retry-After delay). '
+                            . 'Today\'s date is served by /holdings-now logic, never reconstructed. Limits: reconstructed '
+                            . 'Aave reserves have usedAsCollateral=null; Avalanche and Gnosis are not reconstructed '
+                            . '(present in every reconstructed row, empty, with reconstruction_supported=false); tokens '
+                            . 'received before a chain\'s scan start (Polygon: block 80,406,107) and never touched again '
+                            . 'are not discovered; a few unreadable blocks may be skipped (see the plan in the repository).',
                         'parameters' => [
                             [
                                 'name' => 'address',
@@ -834,13 +879,14 @@ class App
                                 'in' => 'query',
                                 'required' => false,
                                 'schema' => ['type' => 'string', 'format' => 'date'],
-                                'description' => 'UTC date to look up cached holdings for, in YYYY-MM-DD '
-                                    . 'format. Defaults to today (UTC) when omitted.'
+                                'description' => 'UTC date to get holdings as of, in YYYY-MM-DD format. Defaults to '
+                                    . 'today (UTC) when omitted. A future date is rejected with 400.'
                             ]
                         ],
                         'responses' => [
                             '200' => [
-                                'description' => 'Cached holdings for that date, grouped by chain',
+                                'description' => 'Holdings for that date, grouped by chain. \"source\" says whether the '
+                                    . 'row is a live cached one or was reconstructed.',
                                 'content' => [
                                     'application/json' => [
                                         'schema' => ['$ref' => '#/components/schemas/HoldingsForDateResult']
@@ -848,16 +894,38 @@ class App
                                 ]
                             ],
                             '400' => [
-                                'description' => 'Invalid address or date',
+                                'description' => 'Invalid address or date, a future date, or no activity at all for this '
+                                    . 'wallet on any supported chain on or before that date',
                                 'content' => [
                                     'application/json' => ['schema' => ['$ref' => '#/components/schemas/Error']]
                                 ]
                             ],
-                            '404' => [
-                                'description' => 'No cached holdings exist for this address on this exact date '
-                                    . '-- /holdings-now was never called for this address on that UTC day',
+                            '409' => [
+                                'description' => 'Another historical reconstruction is using the same RPC providers '
+                                    . '(contention, not a failure). Retry after the Retry-After delay.',
+                                'headers' => [
+                                    'Retry-After' => [
+                                        'description' => 'Seconds to wait before retrying',
+                                        'schema' => ['type' => 'integer']
+                                    ]
+                                ],
+                                'content' => [
+                                    'application/json' => ['schema' => ['$ref' => '#/components/schemas/ReconstructionError']]
+                                ]
+                            ],
+                            '500' => [
+                                'description' => 'Internal error: the database failed, or the reconstruction state is '
+                                    . 'inconsistent (cursors say a date is walked but no row exists for it)',
                                 'content' => [
                                     'application/json' => ['schema' => ['$ref' => '#/components/schemas/Error']]
+                                ]
+                            ],
+                            '502' => [
+                                'description' => 'An RPC provider failed after bounded retries (or a chain has no '
+                                    . 'archive provider configured). Progress is saved: retry the same request and it '
+                                    . 'resumes where it stopped.',
+                                'content' => [
+                                    'application/json' => ['schema' => ['$ref' => '#/components/schemas/ReconstructionError']]
                                 ]
                             ]
                         ]
@@ -1212,26 +1280,31 @@ class App
                     ],
                     'HoldingsForDateResult' => [
                         'type' => 'object',
-                        'description' => 'Whatever was already cached for this address on this exact UTC date '
-                            . '-- always sourced from the full /holdings-now response cache (see the "source" '
-                            . 'field). This endpoint never computes anything live.',
+                        'description' => 'The holdings of this address as of the end of this exact UTC date, from the '
+                            . 'multichain_holdings_cache row for it (see the \"source\" field).',
                         'properties' => [
                             'address' => ['type' => 'string', 'example' => '0x1234...'],
                             'date' => ['type' => 'string', 'format' => 'date', 'example' => '2026-06-28'],
                             'source' => [
                                 'type' => 'string',
-                                'enum' => ['multichain_cache'],
-                                'description' => 'Always "multichain_cache" currently -- the only source this '
-                                    . 'endpoint has. Kept as a field (rather than omitted, since there\'s only '
-                                    . 'one possible value right now) in case a second source is reintroduced '
-                                    . 'later.'
+                                'enum' => ['multichain_cache', 'reconstructed'],
+                                'description' => '\"multichain_cache\": a snapshot cached by a /holdings-now call on '
+                                    . 'that day (the value this endpoint has always returned for such rows). '
+                                    . '\"reconstructed\": written by the historical reconstruction.'
                             ],
                             'defi_errors' => [
                                 'type' => 'object',
                                 'nullable' => true,
                                 'description' => 'Present only if the cached response had partial on-chain read '
                                     . 'failures -- carried over as-is from the original /holdings-now response. '
-                                    . 'See CurrentHoldingsResult\'s "defi_errors" for the shape.'
+                                    . 'See CurrentHoldingsResult\'s \"defi_errors\" for the shape.'
+                            ],
+                            'reconstruction' => [
+                                'type' => 'object',
+                                'nullable' => true,
+                                'description' => 'Present only on a reconstructed row that skipped token contracts '
+                                    . 'which could not be read as ERC-20s at that block (reverting or broken '
+                                    . 'contracts, typically spam). Shape: {skipped_tokens: {<chain>: [{contract, reason}]}}.'
                             ],
                             'holdings' => [
                                 'type' => 'object',
@@ -1276,6 +1349,20 @@ class App
                         'type' => 'object',
                         'properties' => [
                             'message' => ['type' => 'string']
+                        ]
+                    ],
+                    'ReconstructionError' => [
+                        'type' => 'object',
+                        'description' => 'Error of the historical reconstruction (409, 502).',
+                        'properties' => [
+                            'message' => ['type' => 'string'],
+                            'detail' => ['type' => 'string', 'description' => '502 only: what failed.'],
+                            'walked_through' => [
+                                'type' => 'string',
+                                'format' => 'date',
+                                'description' => '502 only: the last day fully reconstructed on every chain, when any.'
+                            ],
+                            'retry_after_seconds' => ['type' => 'integer', 'description' => '409 only.']
                         ]
                     ]
                 ]
