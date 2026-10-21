@@ -345,44 +345,58 @@ $checks['cursors: every chain is at the rung date'] = static function (object $c
     return $problems;
 };
 
-$checks['first activity is the native genesis block on Ethereum and BSC, and the first row is its day'] = static function (object $c): array {
+// The wallet's first activity on Ethereum is NOT its native genesis: a token arrived about 3 months before the first ETH
+// (MULTICHAIN-HOLDINGS.md, "Do not assume native-currency genesis equals the wallet's true first activity"). So the first
+// activity must be at or BEFORE the native genesis block, and the earliest reconstructed row must be the day that contains it.
+$checks['Ethereum: first activity is at or before its native genesis block, and the first row is that day'] = static function (object $c): array {
     $problems = [];
-    $firstDays = [];
+    $first = $c->cursors->find(WALLET, 'ethereum')['firstActivityBlock'] ?? null;
 
-    foreach (['ethereum', 'binance-smart-chain'] as $chain) {
-        $cursor = $c->cursors->find(WALLET, $chain);
-        $first = $cursor['firstActivityBlock'] ?? null;
+    if ($first === null) {
+        return ['ethereum: no first activity block'];
+    }
 
-        if ($first === null) {
-            $problems[] = "{$chain}: no first activity block";
+    echo "        ethereum: first activity block {$first} (native genesis " . GENESIS['ethereum'] . ")\n";
 
-            continue;
-        }
+    if ($first > GENESIS['ethereum']) {
+        $problems[] = "ethereum: first activity block {$first} is AFTER the native genesis block " . GENESIS['ethereum'];
+    }
 
-        if ($first > GENESIS[$chain]) {
-            $problems[] = "{$chain}: first activity block {$first} is AFTER the native genesis block " . GENESIS[$chain];
-        }
+    // The day that contains the first activity block: end_block(D-1) < block <= end_block(D).
+    $firstDay = null;
 
-        echo "        {$chain}: first activity block {$first} (native genesis " . GENESIS[$chain] . ")\n";
+    for ($d = $c->firstReconstructedDay(); $d !== null && $d <= $c->rungDate; $d = addDay($d)) {
+        $end = $c->blocks->find('ethereum', $d);
+        $previous = $c->blocks->find('ethereum', subDay($d));
 
-        // The day that contains the first activity block: end_block(D-1) < block <= end_block(D).
-        for ($d = $c->firstReconstructedDay(); $d !== null && $d <= $c->rungDate; $d = addDay($d)) {
-            $end = $c->blocks->find($chain, $d);
-            $previous = $c->blocks->find($chain, subDay($d));
+        if ($end !== null && $first <= $end && ($previous === null || $previous < $first)) {
+            $firstDay = $d;
 
-            if ($end !== null && $first <= $end && ($previous === null || $previous < $first)) {
-                $firstDays[$chain] = $d;
-
-                break;
-            }
+            break;
         }
     }
 
-    if (count($firstDays) === 2 && min($firstDays) !== $c->firstReconstructedDay()) {
-        $problems[] = 'the earliest reconstructed row is ' . $c->firstReconstructedDay() . ' but the earliest first activity day is ' . min($firstDays);
+    if ($firstDay === null) {
+        $problems[] = 'could not find the day that contains the first activity block among the stored end blocks';
+    } elseif ($firstDay !== $c->firstReconstructedDay()) {
+        $problems[] = 'the earliest reconstructed row is ' . $c->firstReconstructedDay() . " but the day containing the first activity is {$firstDay}";
+    } else {
+        echo "        first activity day: {$firstDay}\n";
     }
 
     return $problems;
+};
+
+$checks['BSC: first activity is at or before its native genesis block'] = static function (object $c): array {
+    $first = $c->cursors->find(WALLET, 'binance-smart-chain')['firstActivityBlock'] ?? null;
+
+    echo '        binance-smart-chain: first activity block ' . ($first ?? 'none') . ' (native genesis ' . GENESIS['binance-smart-chain'] . ")\n";
+
+    if ($first === null) {
+        return ['binance-smart-chain: no first activity block'];
+    }
+
+    return $first <= GENESIS['binance-smart-chain'] ? [] : ["binance-smart-chain: first activity block {$first} is AFTER the native genesis block " . GENESIS['binance-smart-chain']];
 };
 
 $checks['Base first activity is its native genesis block'] = static function (object $c): array {
@@ -406,23 +420,23 @@ $checks['Polygon first activity is its native genesis block 80,406,107'] = stati
  */
 $rungs = [
     1 => [
-        'date' => '2021-08-01', 'expect' => Outcome::STATUS_BEFORE_GENESIS, 'interruptAfter' => 0,
-        'what' => 'a date before the wallet\'s first activity on any chain: the 400 case. Writes no row.',
+        'date' => '2021-04-15', 'expect' => Outcome::STATUS_BEFORE_GENESIS, 'interruptAfter' => 0,
+        'what' => 'a date before the wallet\'s first activity on any chain (on Ethereum it is a token that arrived around mid-May 2021, about 3 months before the first ETH): the 400 case. Writes no row.',
         'checks' => [],
     ],
     2 => [
-        'date' => '2021-08-25', 'expect' => Outcome::STATUS_FOUND, 'interruptAfter' => 60,
-        'what' => 'the first real walk (about 12 days from the first activity on Ethereum and BSC), killed after 60 s and resumed',
+        'date' => '2021-06-15', 'expect' => Outcome::STATUS_FOUND, 'interruptAfter' => 60,
+        'what' => 'the first real walk, about a month from the first activity (Ethereum only: the wallet has nothing on the other chains yet), killed after 60 s and resumed',
         'checks' => [
-            'first activity is the native genesis block on Ethereum and BSC, and the first row is its day',
+            'Ethereum: first activity is at or before its native genesis block, and the first row is that day',
             'rows: one per day without a gap, never two reconstructed rows for a day',
             'cursors: every chain is at the rung date',
         ],
     ],
     3 => [
         'date' => '2021-12-31', 'expect' => Outcome::STATUS_FOUND, 'interruptAfter' => 0,
-        'what' => 'about 140 days: the duration printed here, divided by the number of days, is the per-day cost',
-        'checks' => ['rows: one per day without a gap, never two reconstructed rows for a day', 'cursors: every chain is at the rung date'],
+        'what' => 'about 7 months: BSC joins in mid-August 2021; the duration printed here, divided by the number of days, is the per-day cost',
+        'checks' => ['BSC: first activity is at or before its native genesis block', 'rows: one per day without a gap, never two reconstructed rows for a day', 'cursors: every chain is at the rung date'],
     ],
     4 => [
         'date' => '2023-01-31', 'expect' => Outcome::STATUS_FOUND, 'interruptAfter' => 0,
@@ -468,6 +482,16 @@ $rungs = [
     ],
 ];
 
+// A rung that names a check that does not exist would only blow up hours into a run: refuse to start.
+foreach ($rungs as $n => $rung) {
+    foreach ($rung['checks'] as $name) {
+        if (! isset($checks[$name])) {
+            fwrite(STDERR, "rung {$n} names an unknown check: {$name}\n");
+            exit(2);
+        }
+    }
+}
+
 if (isset($options['list'])) {
     foreach ($rungs as $n => $rung) {
         echo "rung {$n}: {$rung['date']} -> {$rung['expect']}" . ($rung['interruptAfter'] > 0 ? " (killed after {$rung['interruptAfter']}s first)" : '') . "\n    {$rung['what']}\n";
@@ -492,6 +516,35 @@ if (! class_exists(DatabaseFetcher::class)) {
 $rawConfig = require $configFile;
 $db = $rawConfig['db'];
 $fetcher = new DatabaseFetcher(new DatabaseConnection($db['host'], $db['database'], $db['username'], $db['password']));
+
+// ---- preflight: the tables and columns this feature reads and writes must exist, BEFORE hours of scanning ---------------
+$required = [
+    'multichain_holdings_cache' => 'id, address, as_of_date, response_json, source, cached_at',
+    'multichain_reconstruction_cursor' => 'id, address, chain, last_scanned_block, step_size, tokens_json, first_activity_block, cursor_date, updated_at',
+    'evm_block_by_date' => 'id, chain, day_date, end_block, resolved_at',
+    'multichain_reconstruction_unresolved_block' => 'id, chain, block_number, address, last_error, recorded_at',
+];
+$schemaProblems = [];
+
+foreach ($required as $table => $columns) {
+    try {
+        $fetcher->query($fetcher->createQuery($table)->select($columns)->where('id = :id'), ['id' => 0]);
+    } catch (Throwable $e) {
+        $schemaProblems[] = "{$table}: " . $e->getMessage();
+    }
+}
+
+if ($schemaProblems !== []) {
+    fwrite(STDERR, "The database schema is not ready (nothing was scanned):\n");
+
+    foreach ($schemaProblems as $problem) {
+        fwrite(STDERR, "  - {$problem}\n");
+    }
+
+    fwrite(STDERR, "\nRun the migration of README.md. An EXISTING multichain_holdings_cache needs the in-place migration (the as_of_date and source\n"
+        . "columns): check with `SHOW CREATE TABLE multichain_holdings_cache;` and run only the statements that are missing.\n");
+    exit(2);
+}
 
 $cache = new HoldingsNowCacheRepository($fetcher);
 $cursors = new MultichainReconstructionCursorRepository($fetcher);

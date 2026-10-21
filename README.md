@@ -421,6 +421,9 @@ ALTER TABLE `multichain_holdings_cache`
   ADD COLUMN `as_of_date` DATE NULL AFTER `address`,
   ADD COLUMN `source` VARCHAR(16) NOT NULL DEFAULT 'live' AFTER `response_json`;
 
+-- as_of_date is a UTC date: make FROM_UNIXTIME use UTC for this session, whatever your server's time zone is.
+SET time_zone = '+00:00';
+
 UPDATE `multichain_holdings_cache`
   SET `as_of_date` = FROM_UNIXTIME(`cached_at`, '%Y-%m-%d')
   WHERE `as_of_date` IS NULL;

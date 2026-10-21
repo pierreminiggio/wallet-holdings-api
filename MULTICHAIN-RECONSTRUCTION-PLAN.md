@@ -552,3 +552,17 @@ reference value in section 5 has to be re-read.
   by the code: keyed providers with large ranges are a precondition for a multi-year wallet on Ethereum, Base and Polygon. The benchmark now
   also projects the daily log scan (blocks per day over the cap, two requests per chunk) and the total.
 - Not addressed by code, deliberately: no provider-specific tricks, and no cap assumptions in the scanner (it learns the cap at runtime).
+
+### Findings from the first successful Phase 0 on real providers (e2e ladder, rung 1)
+
+- With NodeReal on Ethereum and BSC, Phase 0 took ~5 minutes on Ethereum (13 million blocks) and ~1.5 minutes on BSC (9.7 million),
+  as `bin/check-providers.php` had projected.
+- **The wallet's first Ethereum activity is block 12,427,798, not its native genesis 13,024,431**: a token arrived ~597,000 blocks
+  (about 3 months) before the first ETH, exactly the warning of `MULTICHAIN-HOLDINGS.md` ("Do not assume native-currency genesis equals
+  the wallet's true first activity"). The scanner was right and the ladder's first version was wrong: its rung 1 (2021-08-01) expected
+  `before_genesis` and its rung 2 expected the first row near mid-August 2021. The ladder now uses 2021-04-15 for the 400 case and
+  2021-06-15 for the first walk, and checks that the first activity is AT OR BEFORE the native genesis and that the earliest row is the
+  day that contains it (computed from the stored end blocks, not from an estimate). BSC found nothing up to block 9,671,594, consistent.
+- The run then stopped with `SQLSTATE[42S22] Unknown column 'source'`: the user's `multichain_holdings_cache` predates the
+  `as_of_date` / `source` columns (the README's "in-place migration"). The ladder now checks the schema of all four tables BEFORE
+  scanning and says exactly what is missing. The Phase 0 results were already saved in the cursor, so nothing was scanned twice.
