@@ -566,3 +566,20 @@ reference value in section 5 has to be re-read.
 - The run then stopped with `SQLSTATE[42S22] Unknown column 'source'`: the user's `multichain_holdings_cache` predates the
   `as_of_date` / `source` columns (the README's "in-place migration"). The ladder now checks the schema of all four tables BEFORE
   scanning and says exactly what is missing. The Phase 0 results were already saved in the cursor, so nothing was scanned twice.
+
+### Ladder rungs 1 to 3 passed on the real database (Oct 21 2026), and the per-day cost
+
+- Rung 1 (2021-04-15) `before_genesis` in 38 s (Phase 0 results were already in the cursor); rung 2 (2021-06-15) walked 34 days from the
+  first activity (2021-05-13, the day containing block 12,427,798) in 19 min, after a child process killed at 60 s resumed from its cursor;
+  rung 3 (2021-12-31) walked 199 more days in 1 h 57 min (BSC joined at block 10,027,014, its native genesis). Rows contiguous and unique,
+  cursors at the date, first-activity checks green.
+- **Per-day cost is flat at about 34 to 36 seconds** (33.6 s/day on Ethereum alone, 35.4 s/day once BSC is active), even in 2021 when the
+  wallet holds almost nothing and neither Compound nor Aave exists yet. That points at a fixed per-day cost (end-block resolution,
+  `eth_getCode` probes of contracts not deployed yet, a few balance reads) rather than at the size of the holdings, but this is a guess:
+  it was not measured. Projected for the remaining ~1,750 days of Ethereum and BSC: ~17 hours if the cost stays flat, more after the
+  Aave V3 and Compound III deployments (many more reads per day).
+- **Instrumentation added to find out instead of guessing:** `EvmRpcClient::takeStats()` / `describeStats()` count HTTP attempts and time
+  per call kind (`eth_getBalance`, `eth_call:0x70a08231` = balanceOf, ...), process-wide, and the service's per-day log line now ends with
+  that day's breakdown. Optimise only from those numbers. Candidate levers, in order of expected value and with their risk: JSON-RPC batching
+  (one HTTP request for many calls; needs a per-provider check that batches are accepted and not rate-limited per call), a cheaper end-block
+  search seeded with the previous day's end block plus the expected blocks per day, and fewer `eth_getCode` probes before a deployment.

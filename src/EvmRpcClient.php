@@ -38,6 +38,14 @@ class EvmRpcClient
 
     private const MAX_BACKOFF_MS = 30000;
 
+    /**
+     * Diagnostics: HTTP attempts and time spent per call kind ("eth_getBalance", "eth_call:0x70a08231"...), for ALL clients of
+     * the process, since the last takeStats(). Lets a long reconstruction say where its time goes (see takeStats()).
+     *
+     * @var array<string, array{calls: int, errors: int, seconds: float}>
+     */
+    private static array $stats = [];
+
     private ?EvmRpcError $lastError = null;
 
     private int $nextRequestId = 1;
@@ -64,6 +72,45 @@ class EvmRpcClient
         private int $retryBaseDelayMs = 500,
         private ?Closure $sleeper = null,
     ) {
+    }
+
+    /**
+     * Returns the per-call-kind statistics accumulated since the previous call, and resets them. A call kind is the JSON-RPC
+     * method, plus the 4-byte selector for eth_call (so balanceOf and getUserAccountData are told apart). Process-wide on
+     * purpose (all clients, all providers): it is a diagnostic for the CLI scripts, not application state.
+     *
+     * @return array<string, array{calls: int, errors: int, seconds: float}>
+     */
+    public static function takeStats(): array
+    {
+        $stats = self::$stats;
+        self::$stats = [];
+
+        return $stats;
+    }
+
+    /**
+     * One line summarising takeStats()'s result, biggest time first: "97 calls in 33.2s: eth_call:0x70a08231 40x/15.1s ...".
+     *
+     * @param array<string, array{calls: int, errors: int, seconds: float}> $stats
+     */
+    public static function describeStats(array $stats, int $top = 6): string
+    {
+        if ($stats === []) {
+            return 'no RPC call';
+        }
+
+        uasort($stats, static fn (array $a, array $b): int => $b['seconds'] <=> $a['seconds']);
+
+        $calls = array_sum(array_column($stats, 'calls'));
+        $seconds = array_sum(array_column($stats, 'seconds'));
+        $parts = [];
+
+        foreach (array_slice($stats, 0, $top, true) as $kind => $stat) {
+            $parts[] = $kind . ' ' . $stat['calls'] . 'x/' . round($stat['seconds'], 1) . 's' . ($stat['errors'] > 0 ? '(' . $stat['errors'] . ' err)' : '');
+        }
+
+        return $calls . ' RPC attempts in ' . round($seconds, 1) . 's: ' . implode(', ', $parts);
     }
 
     public function getRpcUrl(): string
@@ -334,6 +381,7 @@ class EvmRpcClient
             }
 
             $this->lastError = $outcome;
+            self::countError($method, $params);
 
             if (! $outcome->isTransient() || $attempt >= $this->maxTransientRetries) {
                 return $outcome;
@@ -354,7 +402,14 @@ class EvmRpcClient
         $payload = json_encode(['jsonrpc' => '2.0', 'id' => $id, 'method' => $method, 'params' => $params]);
 
         $transport = $this->transport ?? Closure::fromCallable([$this, 'curlTransport']);
+        $startedAt = microtime(true);
         $response = $transport($this->rpcUrl, $payload, $this->timeoutSeconds);
+
+        $kind = $method === 'eth_call' ? 'eth_call:' . substr((string) ($params[0]['data'] ?? ''), 0, 10) : $method;
+        $stat = self::$stats[$kind] ?? ['calls' => 0, 'errors' => 0, 'seconds' => 0.0];
+        $stat['calls']++;
+        $stat['seconds'] += microtime(true) - $startedAt;
+        self::$stats[$kind] = $stat;
 
         $body = $response['body'] ?? false;
         $status = (int) ($response['status'] ?? 0);
@@ -404,6 +459,15 @@ class EvmRpcClient
         $status = (int) curl_getinfo($curl, CURLINFO_HTTP_CODE);
 
         return ['body' => $body, 'status' => $status];
+    }
+
+    private static function countError(string $method, array $params): void
+    {
+        $kind = $method === 'eth_call' ? 'eth_call:' . substr((string) ($params[0]['data'] ?? ''), 0, 10) : $method;
+
+        if (isset(self::$stats[$kind])) {
+            self::$stats[$kind]['errors']++;
+        }
     }
 
     private function sleepMs(int $milliseconds): void

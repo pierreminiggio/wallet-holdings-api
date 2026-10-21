@@ -378,3 +378,25 @@ test('hasCodeAt: an RPC failure is an error, not "no code"', function () {
 
     assertTrue($result instanceof EvmRpcError);
 });
+
+test('stats: attempts and time per call kind, eth_call told apart by selector, errors counted, reset on take', function () {
+    EvmRpcClient::takeStats();
+    $calls = [];
+    $client = scripted([ok('0x01'), ok('0x02'), rpcError('execution reverted', 3), ok('0x10')], $calls);
+
+    $client->ethCall('0xabc', '0x70a08231' . str_repeat('0', 64), 100);
+    $client->ethCall('0xabc', '0x70a08231' . str_repeat('0', 64), 100);
+    $client->ethCall('0xabc', '0x313ce567', 100);
+    $client->blockNumber();
+
+    $stats = EvmRpcClient::takeStats();
+
+    assertSame(2, $stats['eth_call:0x70a08231']['calls']);
+    assertSame(1, $stats['eth_call:0x313ce567']['calls']);
+    assertSame(1, $stats['eth_call:0x313ce567']['errors']);
+    assertSame(1, $stats['eth_blockNumber']['calls']);
+    assertSame(0, $stats['eth_blockNumber']['errors']);
+    assertSame([], EvmRpcClient::takeStats(), 'taking the stats resets them');
+    assertTrue(str_contains(EvmRpcClient::describeStats($stats), '4 RPC attempts'));
+    assertSame('no RPC call', EvmRpcClient::describeStats([]));
+});

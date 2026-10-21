@@ -225,6 +225,8 @@ class MultichainHoldingsReconstructionService
      */
     private function walkDay(string $address, string $day, array $ctx): ?MultichainReconstructionOutcome
     {
+        EvmRpcClient::takeStats(); // reset: the day's log line then reports this day's RPC cost only
+
         $existing = $this->cache->getCacheForDate($address, $day) !== null;
         $holdings = [];
         $skipped = [];
@@ -302,7 +304,7 @@ class MultichainHoldingsReconstructionService
             $this->cursors->save($address, $chain, $ctx[$chain]->state, $day, $ctx[$chain]->firstActivity);
         }
 
-        $this->log("{$day}: " . ($existing ? 'a row already existed (kept)' : 'row written') . ', cursors advanced');
+        $this->log("{$day}: " . ($existing ? 'a row already existed (kept)' : 'row written') . ', cursors advanced; ' . EvmRpcClient::describeStats(EvmRpcClient::takeStats()));
 
         return null;
     }
