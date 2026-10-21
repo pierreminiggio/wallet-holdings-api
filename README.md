@@ -219,6 +219,7 @@ php bin/check-2-blocks.php     # date -> end block resolver
 php bin/check-3-scan.php       # log scanner (add --long for the 340k-block Polygon window)
 php bin/check-4-snapshot.php   # snapshot builder: balances, Compound/Aave, native genesis
 php bin/check-5-service.php    # the service end to end on Polygon, in-memory repositories
+php bin/check-providers.php    # measures your RPC providers and estimates the Phase 0 duration of each chain (read-only, run it first)
 php bin/e2e-ladder.php         # the real thing: your database, your providers, the real wallet, fixed dates from cheap to expensive (--list, --through=N)
 ```
 
