@@ -540,8 +540,8 @@ a current balance, so a token that was held and then sold to zero disappears fro
 `step_size` (the scanner's adaptive chunk size, so a resume does not re-learn the provider's cap), `tokens_json`
 (every token contract discovered so far, addresses only), `first_activity_block` (the chain's first activity, `NULL`
 until Phase 0 finds it) and `cursor_date` (the date the walk has **fully completed through**, all its rows written;
-`NULL` until the first day is done). Progress rows saved while a long scan runs keep `cursor_date` unchanged and only
-move the scan fields. **A cursor never advances without its row**: `cursor_date` moves to a day only after that day's
+`NULL` until the first day is done). Progress rows saved while a long scan runs (at most one per chain per minute) keep `cursor_date` unchanged and only
+move the scan fields; older rows of an (address, chain) are never read again and can be pruned. **A cursor never advances without its row**: `cursor_date` moves to a day only after that day's
 `multichain_holdings_cache` row exists. `MultichainReconstructionCursorRepository` is the only reader and writer.
 
 ### Historical reconstruction: `as_of_date` vs `cached_at`, and the cursor table

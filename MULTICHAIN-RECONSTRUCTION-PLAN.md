@@ -524,3 +524,18 @@ reference value in section 5 has to be re-read.
   calls per chain per year of history with keyless providers; hours is the expected order. Skipping Aave reserve reads when
   `getUserAccountData` shows zero was considered and rejected: that figure counts only reserves enabled as collateral, so a
   supplied-but-not-collateral position would be silently dropped.
+
+### Finding from the first run of the e2e ladder (rung 1), and the fix
+
+- **What happened.** Rung 1 (a date before the wallet's first activity) makes Phase 0 scan Ethereum's logs from block 0. On a keyless
+  provider (`drpc.org`, ~101 blocks per `eth_getLogs`) that is ~13 million blocks, i.e. ~130,000 requests: **about half a day**, even
+  for a "cheap" date, and the scanner wrote a cursor row every 20 chunks (one every ~6 s: 241 rows, `last_scanned_block` growing by
+  2,020 each, `tokens_json` `[]`, `first_activity_block` and `cursor_date` NULL). That was the design working as specified, but it is
+  too many rows (~64,000 for this wallet's Ethereum Phase 0 alone).
+- **Fix.** Mid-scan progress rows are now throttled by TIME: at most one per chain per `PROGRESS_SAVE_INTERVAL_SECONDS` (60), about
+  720 rows for a 12-hour scan; a crash costs at most a minute of scanning. Rows for first activity, for each completed day and on
+  every provider error are unchanged. The service also takes an optional logger, which the ladder prints with timestamps so that a long
+  silence never looks like a hang.
+- **Operational consequence, to state plainly:** a keyless Ethereum provider makes even the first segment take hours; a keyed one
+  (NodeReal, ~50,000 blocks per request) makes it minutes. Configure one before running the ladder.
+- The existing cursor rows are harmless (the newest row per address and chain wins, and a resumed run continues from the last one).

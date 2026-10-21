@@ -54,6 +54,13 @@ class MultichainHoldingsReconstructionService
     /** Seconds suggested to a caller that got BUSY. */
     public const BUSY_RETRY_AFTER_SECONDS = 60;
 
+    /**
+     * Minimum seconds between two mid-scan progress rows of one chain. The scanner offers a progress callback every
+     * 20 chunks, which with a provider capped at ~101 blocks per request is one database row every few seconds (about
+     * 64,000 rows for Ethereum's first segment alone). A crash then costs at most this much scanning, which is nothing.
+     */
+    public const PROGRESS_SAVE_INTERVAL_SECONDS = 60;
+
     /** Blocks between two native-balance samples when looking for a chain's native genesis. */
     public const NATIVE_COARSE_STEP = 500000;
 
@@ -63,6 +70,8 @@ class MultichainHoldingsReconstructionService
      * @param list<string> $chains     Chains to walk. Defaults to all supported chains. A chain with no configured
      *                                 provider makes the whole walk fail loudly (a silently skipped chain would be wrong data).
      * @param Closure|null $clock      fn(): int unix time, injectable for tests.
+     * @param int $progressSaveIntervalSeconds minimum seconds between two mid-scan progress rows per chain.
+     * @param Closure|null $logger     fn(string $message): void, told what a multi-hour walk is doing (the CLI scripts print it).
      */
     public function __construct(
         private EvmReconstructionConfig $config,
@@ -74,6 +83,8 @@ class MultichainHoldingsReconstructionService
         private array $chains = EvmReconstructionChains::SUPPORTED_CHAINS,
         private ?Closure $clock = null,
         private ?EvmReconstructionLock $lock = null,
+        private int $progressSaveIntervalSeconds = self::PROGRESS_SAVE_INTERVAL_SECONDS,
+        private ?Closure $logger = null,
     ) {
         foreach ($chains as $chain) {
             if (! EvmReconstructionChains::isSupported($chain)) {
@@ -291,6 +302,8 @@ class MultichainHoldingsReconstructionService
             $this->cursors->save($address, $chain, $ctx[$chain]->state, $day, $ctx[$chain]->firstActivity);
         }
 
+        $this->log("{$day}: " . ($existing ? 'a row already existed (kept)' : 'row written') . ', cursors advanced');
+
         return null;
     }
 
@@ -324,7 +337,15 @@ class MultichainHoldingsReconstructionService
             EvmLogScanner::DEFAULT_MAX_STEP,
             20,
             function (EvmLogScanState $state) use ($address, $chain, $walk): void {
+                // Throttled by time, not by chunk count: see PROGRESS_SAVE_INTERVAL_SECONDS.
+                if (time() - $walk->lastProgressSave < $this->progressSaveIntervalSeconds) {
+                    return;
+                }
+
+                $walk->lastProgressSave = time();
                 $this->cursors->save($address, $chain, $state, $walk->cursorDate, $walk->firstActivity);
+                $this->log("{$chain}: logs scanned through block {$state->getLastScannedBlock()} (step {$state->getStepSize()}), "
+                    . count($state->tokens()) . ' token(s) so far' . ($walk->firstActivity === null ? ', first activity not found yet' : ''));
             },
             function (int $block, string $error) use ($address, $chain): void {
                 $this->unresolved->record($chain, $block, $address, $error);
@@ -374,6 +395,7 @@ class MultichainHoldingsReconstructionService
         $logBlock = null;
 
         if ($c->state->getLastScannedBlock() < $endTarget) {
+            $this->log("{$chain}: looking for the first activity, scanning logs from block " . ($c->state->getLastScannedBlock() + 1) . " to {$endTarget}");
             $result = $c->scanner->scan($address, $c->state, $endTarget, null, true);
 
             if ($result->getStatus() === EvmLogScanResult::STATUS_PROVIDER_ERROR) {
@@ -402,6 +424,7 @@ class MultichainHoldingsReconstructionService
 
         $c->firstActivity = $first;
         $this->cursors->save($address, $chain, $c->state, $c->cursorDate, $first);
+        $this->log("{$chain}: " . ($first === null ? "no activity found up to block {$endTarget}" : "first activity at block {$first}"));
 
         return null;
     }
@@ -532,6 +555,13 @@ class MultichainHoldingsReconstructionService
     private static function addDay(string $date): string
     {
         return (new DateTimeImmutable($date . ' 00:00:00', new DateTimeZone('UTC')))->modify('+1 day')->format('Y-m-d');
+    }
+
+    private function log(string $message): void
+    {
+        if ($this->logger !== null) {
+            ($this->logger)($message);
+        }
     }
 
     private function now(): int

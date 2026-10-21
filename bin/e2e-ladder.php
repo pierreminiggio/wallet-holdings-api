@@ -498,7 +498,24 @@ $cursors = new MultichainReconstructionCursorRepository($fetcher);
 $blocks = new EvmBlockByDateRepository($fetcher);
 $unresolved = new EvmUnresolvedBlockRepository($fetcher);
 
-$service = new MultichainHoldingsReconstructionService(new EvmReconstructionConfig($rawConfig), $cache, $cursors, $blocks, $unresolved);
+// What a multi-hour walk is doing, with a timestamp, so a long silence never looks like a hang.
+$logger = static function (string $message): void {
+    echo '        [' . gmdate('H:i:s') . '] ' . $message . "\n";
+};
+
+$service = new MultichainHoldingsReconstructionService(
+    new EvmReconstructionConfig($rawConfig),
+    $cache,
+    $cursors,
+    $blocks,
+    $unresolved,
+    null,
+    EvmReconstructionChains::SUPPORTED_CHAINS,
+    null,
+    null,
+    MultichainHoldingsReconstructionService::PROGRESS_SAVE_INTERVAL_SECONDS,
+    $logger
+);
 
 function runOnce(MultichainHoldingsReconstructionService $service, string $date): Outcome
 {

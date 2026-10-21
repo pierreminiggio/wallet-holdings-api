@@ -33,6 +33,9 @@ final class MultichainChainWalk
     /** end_block of the requested date; null when that date is before the chain's history start. */
     public ?int $endTarget = null;
 
+    /** Unix time of the last mid-scan progress row written for this chain (0: none yet). */
+    public int $lastProgressSave = 0;
+
     /** end_block of the previous day resolved, used as a lower-bound hint for the next one. */
     public ?int $lastEnd = null;
 

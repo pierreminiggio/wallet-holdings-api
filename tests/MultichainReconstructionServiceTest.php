@@ -143,6 +143,8 @@ function serviceFixture(array $worlds, ?\Closure $override = null, ?string $lock
         return new EvmRpcClient($url, $transport, 15, 2, 1, static function (int $ms): void {});
     };
 
+    $fx->factory = $factory;
+
     $fx->make = static fn (?array $chains = null) => new MultichainHoldingsReconstructionService(
         $fx->config,
         $fx->cache,
@@ -152,6 +154,8 @@ function serviceFixture(array $worlds, ?\Closure $override = null, ?string $lock
         $factory,
         $chains ?? array_keys($worlds),
         static fn (): int => SVC_NOW,
+        null,
+        0, // no throttling: every scanner progress callback saves a cursor row, so the tests exercise those rows
     );
 
     return $fx;
@@ -586,4 +590,46 @@ test('service: native genesis search finds the exact block (coarse samples, then
     ($fx2->make)()->reconstruct(SVC_WALLET, '2023-12-30');
     assertSame(0, $fx2->cursors->find(SVC_WALLET, 'ethereum')['firstActivityBlock']);
     assertSame(['2023-12-29', '2023-12-30'], $fx2->cache->datesOf('reconstructed'));
+});
+
+test('service: mid-scan progress rows are throttled by time, not written every few chunks', function () {
+    $world = ethereumWorld();
+    $world['cap'] = 101; // the keyless-provider case: hundreds of tiny chunks
+
+    $unthrottled = serviceFixture(['ethereum' => $world]);
+    ($unthrottled->make)()->reconstruct(SVC_WALLET, '2024-01-03');
+
+    $fx = serviceFixture(['ethereum' => $world]);
+    $service = new MultichainHoldingsReconstructionService(
+        $fx->config, $fx->cache, $fx->cursors, $fx->blocks, $fx->unresolved, $fx->factory, ['ethereum'], static fn (): int => SVC_NOW, null, 3600
+    );
+    $outcome = $service->reconstruct(SVC_WALLET, '2024-01-03');
+
+    assertTrue($outcome->isFound(), (string) $outcome->getMessage());
+    assertTrue(count($unthrottled->cursors->rows) > 15, 'sanity: without throttling there are many progress rows (' . count($unthrottled->cursors->rows) . ')');
+    // at most one progress row per phase, plus first activity, plus one per day (4 days)
+    assertTrue(count($fx->cursors->rows) <= 8, 'with a one-hour interval only a handful of rows remain, got ' . count($fx->cursors->rows));
+
+    // and the result is identical: throttling only affects how often progress is saved
+    foreach (['2023-12-31', '2024-01-01', '2024-01-02', '2024-01-03'] as $day) {
+        $a = rowFor($fx, $day);
+        $b = rowFor($unthrottled, $day);
+        unset($a['cache'], $b['cache']);
+        assertSame($b, $a, $day);
+    }
+});
+
+test('service: the logger is told what a long walk is doing', function () {
+    $fx = serviceFixture(['ethereum' => ethereumWorld()]);
+    $messages = [];
+    $service = new MultichainHoldingsReconstructionService(
+        $fx->config, $fx->cache, $fx->cursors, $fx->blocks, $fx->unresolved, $fx->factory, ['ethereum'], static fn (): int => SVC_NOW, null, 0,
+        static function (string $m) use (&$messages): void {
+            $messages[] = $m;
+        }
+    );
+    $service->reconstruct(SVC_WALLET, '2023-12-31');
+
+    assertTrue(count(array_filter($messages, static fn (string $m): bool => str_contains($m, 'first activity at block 16000'))) === 1, implode(' | ', $messages));
+    assertTrue(count(array_filter($messages, static fn (string $m): bool => str_contains($m, '2023-12-31: row written'))) === 1);
 });
