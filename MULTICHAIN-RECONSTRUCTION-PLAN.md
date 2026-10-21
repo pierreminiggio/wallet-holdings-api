@@ -539,3 +539,16 @@ reference value in section 5 has to be re-read.
 - **Operational consequence, to state plainly:** a keyless Ethereum provider makes even the first segment take hours; a keyed one
   (NodeReal, ~50,000 blocks per request) makes it minutes. Configure one before running the ladder.
 - The existing cursor rows are harmless (the newest row per address and chain wins, and a resumed run continues from the last one).
+
+### Finding from `bin/check-providers.php` on the user's providers (Oct 2026)
+
+- **The keyless providers do not scale to this feature.** Measured: `eth.drpc.org` accepts a 97 to 194-block range and answered 2 of 12
+  sample requests (10 "Request timeout on the free plan"): projected Phase 0 for Ethereum ~41 days. `base.drpc.org` and
+  `polygon.drpc.org` also accept under 200 blocks (the blueprint's "~10,000 on Base" no longer holds, or depends on density): ~2.5
+  requests per second, Base's Phase 0 projects to ~3.4 days. NodeReal on BNB Smart Chain accepts 50,000 blocks: ~95 s.
+- The ladder's first run showed it too: ~23 blocks per second on Ethereum in the later part of the run (about 13 times slower than the
+  first run), consistent with heavy timeouts.
+- **Consequence.** Everything below holds, but the cost of a first request for an old date is set by the providers' `eth_getLogs` range, not
+  by the code: keyed providers with large ranges are a precondition for a multi-year wallet on Ethereum, Base and Polygon. The benchmark now
+  also projects the daily log scan (blocks per day over the cap, two requests per chunk) and the total.
+- Not addressed by code, deliberately: no provider-specific tricks, and no cap assumptions in the scanner (it learns the cap at runtime).

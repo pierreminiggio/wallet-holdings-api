@@ -22,7 +22,8 @@ final class EvmReconstructionConfig
 {
     /**
      * Keyless defaults. Real eth_getLogs caps are far below what these providers claim
-     * (about 101 blocks on drpc for Ethereum and Polygon, about 10,000 on Base): the
+     * (measured in Oct 2026 with bin/check-providers.php: under 200 blocks on drpc for Ethereum, Base and
+     * Polygon alike, and Ethereum there also times out most requests; NodeReal accepts 50,000 on BNB Smart Chain): the
      * scanner adapts, it does not trust a configured number.
      *
      * @var array<string, list<array{name: string, url: string}>>

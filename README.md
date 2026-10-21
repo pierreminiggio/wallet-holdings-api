@@ -194,8 +194,13 @@ blocks were found on one wallet: re-check a listed block the first time another 
   **BNB Smart Chain has no keyless archive provider: add a free NodeReal URL under `reconstruction.rpc` in
   `config.php`**, otherwise every reconstruction fails with a `502` that names the missing chain (a silently skipped
   chain would be wrong data). Per chain you can configure several providers in priority order; they are used as
-  failover. Keyless providers are rate limited and cap `eth_getLogs` to about 101 blocks on Ethereum and Polygon:
-  the scanner adapts, but a multi-year first request is long. A keyed provider is much faster.
+  failover. **The keyless defaults are only practical for short ranges.** Measured in October 2026 with
+  `bin/check-providers.php`: `drpc.org` accepts under 200 blocks per `eth_getLogs` on Ethereum, Base and Polygon, and the
+  Ethereum endpoint timed out 10 requests out of 12 ("Request timeout on the free plan"). At ~100 blocks per request the
+  Phase 0 scan of Ethereum alone (13 million blocks) projects to weeks, and scanning each later day costs ~150 requests on
+  Ethereum and ~900 on Base and Polygon. A provider that accepts large ranges (NodeReal accepted 50,000 on BNB Smart Chain)
+  turns the same scans into a few hundred requests. **Configure keyed providers for Ethereum, Base and Polygon before asking
+  for an old date**, and run `php bin/check-providers.php` to see what each provider accepts and how long it projects to take.
 - **Locks.** One `flock` file per (chain, provider) in `reconstruction.lock_directory` (writable by the web server,
   outside the web root; defaults to a directory under the system temp dir). A second reconstruction that needs a
   lock already held gets a `409` with `Retry-After`. The OS releases a lock if the process dies. This assumes a

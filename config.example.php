@@ -60,8 +60,10 @@ return [
             'binance-smart-chain' => [
                 ['name' => 'nodereal', 'url' => 'https://bsc-mainnet.nodereal.io/v1/YOUR_KEY']
             ],
-            // Optional, e.g. a second Ethereum provider (NodeReal's real eth_getLogs cap is
-            // ~49,999 blocks, against ~101 on drpc.org, so it is much faster for the scan):
+            // STRONGLY RECOMMENDED for Ethereum, Base and Polygon: the keyless drpc.org defaults accept only
+            // ~100 blocks per eth_getLogs (and Ethereum there times out most requests), which makes a multi-year
+            // wallet take days to weeks; a provider with a large range (NodeReal measured 50,000 blocks) makes it
+            // minutes to hours. Run `php bin/check-providers.php` to measure what yours accept:
             // 'ethereum' => [
             //     ['name' => 'nodereal', 'url' => 'https://eth-mainnet.nodereal.io/v1/YOUR_KEY'],
             //     ['name' => 'drpc', 'url' => 'https://eth.drpc.org']

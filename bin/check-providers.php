@@ -12,7 +12,10 @@
  *   2. sends --requests sequential eth_getLogs at that size, with NO retry, so rate limiting and timeouts show up as
  *      they are (counted by class), and times them;
  *   3. estimates the time to scan from the chain's history start to the wallet's first activity block (the native
- *      genesis blocks proven by bin/check-4-snapshot.php), at two requests per chunk (both transfer directions).
+ *      genesis blocks proven by bin/check-4-snapshot.php), at two requests per chunk (both transfer directions);
+ *   4. estimates the time to scan the logs of every day from that first activity to today (measuring the chain's blocks
+ *      per day from its head), which is the part that dominates for a multi-year history.
+ * Log scanning is only one part of a day's cost: each walked day also makes roughly 100 to 300 other RPC calls per chain.
  * The estimate is a projection from a short sample: treat it as an order of magnitude. Read-only: no database, nothing written.
  */
 
@@ -195,6 +198,26 @@ foreach (EvmReconstructionChains::SUPPORTED_CHAINS as $chain) {
         echo '      ' . round($secondsPerOk, 2) . ' s per successful request (' . round(1 / max($secondsPerOk, 0.001), 2) . "/s)\n";
         echo '      PHASE 0 estimate, history start to first activity (' . number_format($blocksToScan) . ' blocks, ' . number_format($chunks) . ' chunks, '
             . number_format($chunks * 2) . ' requests): ~' . human($estimate) . "\n";
+
+        // 4. the daily log scan from the first activity to today
+        $latest = $client->getBlockByNumber($head);
+        $earlier = $client->getBlockByNumber(max(0, $head - 100000));
+        $first = $client->getBlockByNumber($firstActivity);
+
+        if ($latest instanceof EvmRpcError || $earlier instanceof EvmRpcError || $first instanceof EvmRpcError || $latest['timestamp'] <= $earlier['timestamp']) {
+            echo "      daily scan estimate: could not read block timestamps (archive access needed)\n";
+
+            continue;
+        }
+
+        $blocksPerDay = 86400 * 100000 / ($latest['timestamp'] - $earlier['timestamp']);
+        $days = max(1, ($latest['timestamp'] - $first['timestamp']) / 86400);
+        $requestsPerDay = (int) ceil($blocksPerDay / $cap) * 2;
+        $dailyTotal = $days * $requestsPerDay * $secondsPerOk;
+
+        echo '      DAILY log scan, first activity to today: ~' . number_format($blocksPerDay) . ' blocks/day, ' . number_format($requestsPerDay) . ' requests/day over '
+            . round($days) . ' days = ' . number_format($days * $requestsPerDay) . ' requests: ~' . human($dailyTotal) . "\n";
+        echo '      TOTAL log scanning for a full reconstruction: ~' . human($estimate + $dailyTotal) . "\n";
     }
 }
 
