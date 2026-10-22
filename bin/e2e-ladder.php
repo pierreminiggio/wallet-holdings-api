@@ -444,16 +444,21 @@ $rungs = [
         'checks' => ['rows: one per day without a gap, never two reconstructed rows for a day', 'cursors: every chain is at the rung date'],
     ],
     5 => [
+        'date' => '2023-02-28', 'expect' => Outcome::STATUS_FOUND, 'interruptAfter' => 0,
+        'what' => 'a month with Aave V3 and Compound III live on Ethereum: a measuring rung, each day\'s log line ends with its RPC breakdown (which call kinds take the time)',
+        'checks' => ['rows: one per day without a gap, never two reconstructed rows for a day', 'cursors: every chain is at the rung date'],
+    ],
+    6 => [
         'date' => '2025-09-30', 'expect' => Outcome::STATUS_FOUND, 'interruptAfter' => 0,
         'what' => 'crosses Base\'s native genesis (about 2025-09-09): a chain that starts mid-walk, with a Phase 0 over about 35 million blocks',
         'checks' => ['Base first activity is its native genesis block', 'rows: one per day without a gap, never two reconstructed rows for a day', 'cursors: every chain is at the rung date'],
     ],
-    6 => [
+    7 => [
         'date' => '2025-10-31', 'expect' => Outcome::STATUS_FOUND, 'interruptAfter' => 0,
         'what' => 'the first reference values: Ethereum Compound and BSC Aave',
         'checks' => ['reference 2025-10-31: Ethereum Compound, BSC Aave', 'rows: one per day without a gap, never two reconstructed rows for a day', 'cursors: every chain is at the rung date'],
     ],
-    7 => [
+    8 => [
         'date' => '2025-12-31', 'expect' => Outcome::STATUS_FOUND, 'interruptAfter' => 0,
         'what' => 'Ethereum references of 2025-11-30 and 2025-12-31, Polygon\'s start (2025-12-16) and its native USDC day by day',
         'checks' => [
@@ -465,12 +470,12 @@ $rungs = [
             'cursors: every chain is at the rung date',
         ],
     ],
-    8 => [
+    9 => [
         'date' => '2026-02-14', 'expect' => Outcome::STATUS_FOUND, 'interruptAfter' => 0,
         'what' => 'the Polygon Aave reference',
         'checks' => ['reference 2026-02-14: Polygon Aave', 'Polygon native USDC matches the known transfers, every day from 2025-12-16 to 2026-01-05', 'rows: one per day without a gap, never two reconstructed rows for a day', 'cursors: every chain is at the rung date'],
     ],
-    9 => [
+    10 => [
         'date' => '2026-10-19', 'expect' => Outcome::STATUS_FOUND, 'interruptAfter' => 0,
         'what' => 'up to yesterday: Aave zero on BSC and Polygon, the USDT0 residual, and the live row of 2026-07-19 against its reconstructed neighbours',
         'checks' => [

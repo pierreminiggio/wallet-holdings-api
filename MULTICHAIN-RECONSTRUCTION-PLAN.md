@@ -583,3 +583,22 @@ reference value in section 5 has to be re-read.
   that day's breakdown. Optimise only from those numbers. Candidate levers, in order of expected value and with their risk: JSON-RPC batching
   (one HTTP request for many calls; needs a per-provider check that batches are accepted and not rate-limited per call), a cheaper end-block
   search seeded with the previous day's end block plus the expected blocks per day, and fewer `eth_getCode` probes before a deployment.
+
+### Ladder rung 4 passed (Oct 21 2026): the per-day cost steps up at each DeFi deployment
+
+- Rung 4 (2023-01-31) walked 395 days in 4 h 43 min with no failure; rows contiguous and unique, cursors at the date. The stored row of
+  2023-01-31 looks right (ETH 0.44322845 and the TR3 token on Ethereum; six BNB Smart Chain tokens; `defi` empty; Avalanche and Gnosis present,
+  empty, flagged `reconstruction_supported: false`). Re-running the ladder over already walked rungs costs ~20 s per rung, no new row.
+- **Per-day cost from the log timestamps:** ~35 s/day until 2022-08-12, **~41 s/day from 2022-08-13** (Compound III markets now deployed: a handful of
+  extra reads), then **~97 s/day from 2022-12-29** (the Aave V3 Pool now deployed: about 100 `balanceOf` reads over every reserve's aToken and
+  debt tokens). The jump to 97 s is the dominant cost for every later day, on every chain where Aave V3 exists.
+- **Projection, not a measurement:** the remaining ~1,360 days of Ethereum at ~97 s/day are ~37 hours, before BNB Smart Chain's own Aave V3 days and before
+  Base and Polygon (small `eth_getLogs` ranges on the keyless providers; Base's Phase 0 alone projects to ~3 days there). A full multi-year
+  reconstruction is therefore days, not hours, unless the per-day reads get cheaper.
+- **Rung numbering changed:** a measuring rung was inserted as rung 5 (2023-02-28, a month with Aave V3 and Compound III live; each day's log line ends
+  with the RPC breakdown), so the Base-crossing rung is now 6 and the last one is 10. **Do not run rung 6 before configuring a keyed Base provider**:
+  it triggers Base's Phase 0 (35 million blocks).
+- **Next lever, to be decided from measurements:** JSON-RPC batching (one HTTP request carrying many reads; the Aave and token balance reads of a day
+  are independent). `bin/check-providers.php` now probes it per provider (accepted batch size, speed-up versus sequential reads) because
+  support and limits differ by provider and must not be assumed; the code would fall back to sequential reads where a batch is refused or answered
+  incompletely.

@@ -15,6 +15,9 @@
  *      genesis blocks proven by bin/check-4-snapshot.php), at two requests per chunk (both transfer directions);
  *   4. estimates the time to scan the logs of every day from that first activity to today (measuring the chain's blocks
  *      per day from its head), which is the part that dominates for a multi-year history.
+ *   5. probes JSON-RPC BATCH support: how many archive eth_getBalance reads one HTTP request may carry, and how much faster that
+ *      is than the same reads sent one by one. A day's state reads (Aave: dozens of balanceOf) are the dominant cost of a walk,
+ *      and batching is the main lever on it; whether a provider accepts batches, and how many, must be measured, not assumed.
  * Log scanning is only one part of a day's cost: each walked day also makes roughly 100 to 300 other RPC calls per chain.
  * The estimate is a projection from a short sample: treat it as an order of magnitude. Read-only: no database, nothing written.
  */
@@ -83,6 +86,112 @@ function human(float $seconds): string
     }
 
     return round($seconds / 86400, 1) . ' days';
+}
+
+/**
+ * One raw JSON-RPC batch: an array of requests in one HTTP POST. Returns [ok, seconds, message].
+ *
+ * @return array{0: bool, 1: float, 2: string}
+ */
+function sendBatch(string $url, int $size, int $head): array
+{
+    $payload = [];
+
+    for ($i = 1; $i <= $size; $i++) {
+        $payload[] = ['jsonrpc' => '2.0', 'id' => $i, 'method' => 'eth_getBalance', 'params' => [WALLET, '0x' . dechex(max(1, $head - $i * 1000))]];
+    }
+
+    $curl = curl_init($url);
+    curl_setopt_array($curl, [
+        CURLOPT_POST => true,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
+        CURLOPT_POSTFIELDS => json_encode($payload),
+        CURLOPT_TIMEOUT => 60,
+        CURLOPT_USERAGENT => 'wallet-holdings-api/1.0',
+    ]);
+
+    $started = microtime(true);
+    $body = curl_exec($curl);
+    $status = (int) curl_getinfo($curl, CURLINFO_HTTP_CODE);
+    $seconds = microtime(true) - $started;
+
+    if ($body === false || $body === '') {
+        return [false, $seconds, "no response (HTTP {$status})"];
+    }
+
+    $decoded = json_decode($body, true);
+
+    if (! is_array($decoded)) {
+        return [false, $seconds, "HTTP {$status}, not JSON"];
+    }
+
+    // A refused batch usually comes back as ONE error object instead of an array.
+    if (isset($decoded['error'])) {
+        return [false, $seconds, 'HTTP ' . $status . ': ' . substr((string) ($decoded['error']['message'] ?? json_encode($decoded['error'])), 0, 90)];
+    }
+
+    $seen = [];
+    $failed = 0;
+
+    foreach ($decoded as $item) {
+        if (! is_array($item) || ! isset($item['id'])) {
+            return [false, $seconds, 'a batch entry has no id'];
+        }
+
+        $seen[$item['id']] = true;
+
+        if (! isset($item['result']) || ! is_string($item['result'])) {
+            $failed++;
+        }
+    }
+
+    if (count($seen) !== $size) {
+        return [false, $seconds, 'got ' . count($seen) . " answers for {$size} requests (dropped entries)"];
+    }
+
+    return $failed === 0 ? [true, $seconds, 'ok'] : [false, $seconds, "{$failed} of {$size} entries failed (" . substr(json_encode($decoded[0]), 0, 90) . ')'];
+}
+
+function probeBatch(string $url, EvmRpcClient $client, int $head): void
+{
+    // Sequential reference: the same kind of read, one request each.
+    $started = microtime(true);
+    $okSequential = 0;
+
+    for ($i = 1; $i <= 5; $i++) {
+        $balance = $client->getBalance(WALLET, max(1, $head - $i * 1000));
+        $okSequential += $balance instanceof EvmRpcError ? 0 : 1;
+    }
+
+    $perCall = $okSequential > 0 ? (microtime(true) - $started) / $okSequential : null;
+
+    $best = 0;
+    $bestSeconds = 0.0;
+    $lastFailure = null;
+
+    foreach ([2, 10, 25, 50, 100] as $size) {
+        [$ok, $seconds, $message] = sendBatch($url, $size, $head);
+
+        if (! $ok) {
+            $lastFailure = "batch of {$size}: {$message}";
+
+            break;
+        }
+
+        $best = $size;
+        $bestSeconds = $seconds;
+    }
+
+    if ($best === 0) {
+        echo "      JSON-RPC batch: NOT usable ({$lastFailure})\n";
+
+        return;
+    }
+
+    $speed = $perCall !== null && $bestSeconds > 0 ? ' = ' . round($best * $perCall / $bestSeconds, 1) . 'x faster than ' . $best . ' sequential reads (~' . round($best * $perCall, 1) . ' s)' : '';
+    echo "      JSON-RPC batch: accepted up to {$best} per request in " . round($bestSeconds, 2) . " s{$speed}"
+        . ($lastFailure !== null ? "; refused beyond: {$lastFailure}" : ' (larger sizes not tried)') . "\n";
 }
 
 $walletTopic = EvmLogScanner::walletTopic(WALLET);
@@ -187,6 +296,9 @@ foreach (EvmReconstructionChains::SUPPORTED_CHAINS as $chain) {
 
             continue;
         }
+
+        // 5. JSON-RPC batch probe (archive eth_getBalance at distinct old blocks, like a day's state reads)
+        probeBatch($provider['url'], $client, $head);
 
         // 3. the Phase 0 projection: seconds per SUCCESSFUL request include the time lost to failures
         $secondsPerOk = $elapsed / $ok;
