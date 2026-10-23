@@ -63,6 +63,10 @@ class EvmRpcClient
      *                                 array{body: string|false, status: int}. Defaults to curl.
      *                                 Injectable so tests never touch the network.
      * @param Closure|null $sleeper    fn(int $milliseconds): void. Injectable for the same reason.
+     * @param int $maxBatchSize        Most JSON-RPC calls sent in ONE HTTP request by requestBatch() (1 = no batching, the safe
+     *                                 default). Provider specific and measured, never assumed: NodeReal accepted 100, drpc's free
+     *                                 plan 3 (bin/check-providers.php). A provider that refuses a batch turns batching off for this
+     *                                 client and the calls are sent one by one, so a too-large setting costs speed, not correctness.
      */
     public function __construct(
         private string $rpcUrl,
@@ -71,6 +75,7 @@ class EvmRpcClient
         private int $maxTransientRetries = 0,
         private int $retryBaseDelayMs = 500,
         private ?Closure $sleeper = null,
+        private int $maxBatchSize = 1,
     ) {
     }
 
@@ -144,6 +149,14 @@ class EvmRpcClient
         $blockParam = self::blockParam($block);
         $result = $this->request('eth_call', [['to' => $to, 'data' => $data], $blockParam]);
 
+        return $this->finishEthCall($result, $blockParam);
+    }
+
+    /**
+     * The eth_call result rules, shared by ethCall() and ethCallMany().
+     */
+    private function finishEthCall(mixed $result, string $blockParam): string
+    {
         if ($result instanceof EvmRpcError) {
             return self::ERROR_UPSTREAM;
         }
@@ -172,6 +185,65 @@ class EvmRpcClient
         }
 
         return $result;
+    }
+
+    /**
+     * Many eth_calls at one block, batched when the provider allows it. Same per-call contract as ethCall() (a hex string, or
+     * ERROR_UPSTREAM for that call), same order as $calls. getLastError() describes the first failure.
+     *
+     * @param list<array{0: string, 1: string}> $calls [to, data] pairs
+     *
+     * @return list<string>
+     */
+    public function ethCallMany(array $calls, int|string $block): array
+    {
+        $blockParam = self::blockParam($block);
+        $batch = [];
+
+        foreach ($calls as [$to, $data]) {
+            $batch[] = ['eth_call', [['to' => $to, 'data' => $data], $blockParam]];
+        }
+
+        $results = [];
+        $firstError = null;
+
+        foreach ($this->requestBatch($batch) as $result) {
+            $value = $this->finishEthCall($result, $blockParam);
+
+            if ($value === self::ERROR_UPSTREAM && $firstError === null) {
+                $firstError = $this->lastError;
+            }
+
+            $results[] = $value;
+        }
+
+        if ($firstError !== null) {
+            $this->lastError = $firstError;
+        }
+
+        return $results;
+    }
+
+    public function getMaxBatchSize(): int
+    {
+        return $this->maxBatchSize;
+    }
+
+    /**
+     * The chain id the provider serves (eth_chainId). A configured URL that belongs to ANOTHER chain (a BNB Smart Chain URL
+     * pasted under "base") would otherwise answer every read with the wrong chain's data and look perfectly healthy.
+     */
+    public function chainId(): int|EvmRpcError
+    {
+        $result = $this->request('eth_chainId', []);
+
+        if ($result instanceof EvmRpcError) {
+            return $result;
+        }
+
+        $value = self::parseQuantity($result);
+
+        return $value ?? $this->fail('eth_chainId result is not a hex quantity');
     }
 
     // --------------------------------------------------------- historical helpers
@@ -277,6 +349,79 @@ class EvmRpcClient
     public function hasCodeAt(string $address, int $block): bool|EvmRpcError
     {
         $key = strtolower($address);
+        $known = $this->knownCode($key, $block);
+
+        if ($known !== null) {
+            return $known;
+        }
+
+        $code = $this->getCode($address, $block);
+
+        if ($code instanceof EvmRpcError) {
+            return $code;
+        }
+
+        $has = $code !== '0x';
+        $this->rememberCode($key, $block, $has);
+
+        return $has;
+    }
+
+    /**
+     * hasCodeAt() for many addresses at one block: the memo answers what it can, and ONE batched eth_getCode round trip (when
+     * the provider allows batching) answers the rest.
+     *
+     * @param list<string> $addresses
+     *
+     * @return array<string, bool>|EvmRpcError lower-cased address => has code; the first failure otherwise
+     */
+    public function hasCodesAt(array $addresses, int $block): array|EvmRpcError
+    {
+        $answers = [];
+        $unknown = [];
+
+        foreach ($addresses as $address) {
+            $key = strtolower($address);
+            $known = $this->knownCode($key, $block);
+
+            if ($known !== null) {
+                $answers[$key] = $known;
+            } else {
+                $unknown[$key] = $address;
+            }
+        }
+
+        if ($unknown === []) {
+            return $answers;
+        }
+
+        $keys = array_keys($unknown);
+        $batch = [];
+
+        foreach ($keys as $key) {
+            $batch[] = ['eth_getCode', [$unknown[$key], self::blockParam($block)]];
+        }
+
+        foreach ($this->requestBatch($batch) as $i => $result) {
+            if ($result instanceof EvmRpcError) {
+                return $result;
+            }
+
+            if (! is_string($result) || preg_match('/^0x[0-9a-fA-F]*$/', $result) !== 1) {
+                return $this->fail('eth_getCode result is not hex');
+            }
+
+            $has = $result !== '0x';
+            $this->rememberCode($keys[$i], $block, $has);
+            $answers[$keys[$i]] = $has;
+        }
+
+        return $answers;
+    }
+
+    /** @return bool|null null when the memo cannot answer */
+    private function knownCode(string $key, int $block): ?bool
+    {
         $memo = $this->codeMemo[$key] ?? ['deployedFrom' => null, 'missingThrough' => null];
 
         if ($memo['deployedFrom'] !== null && $block >= $memo['deployedFrom']) {
@@ -287,23 +432,20 @@ class EvmRpcClient
             return false;
         }
 
-        $code = $this->getCode($address, $block);
+        return null;
+    }
 
-        if ($code instanceof EvmRpcError) {
-            return $code;
-        }
+    private function rememberCode(string $key, int $block, bool $has): void
+    {
+        $memo = $this->codeMemo[$key] ?? ['deployedFrom' => null, 'missingThrough' => null];
 
-        if ($code === '0x') {
+        if ($has) {
+            $memo['deployedFrom'] = min($memo['deployedFrom'] ?? $block, $block);
+        } else {
             $memo['missingThrough'] = max($memo['missingThrough'] ?? $block, $block);
-            $this->codeMemo[$key] = $memo;
-
-            return false;
         }
 
-        $memo['deployedFrom'] = min($memo['deployedFrom'] ?? $block, $block);
         $this->codeMemo[$key] = $memo;
-
-        return true;
     }
 
     /**
@@ -391,6 +533,179 @@ class EvmRpcClient
             $attempt++;
             $this->sleepMs($delay);
         }
+    }
+
+    /**
+     * Several JSON-RPC calls, in as few HTTP requests as the provider allows (maxBatchSize). Same order in and out; each
+     * element is the call's result or an EvmRpcError, exactly as request() would have returned it.
+     *
+     * RULES, because a batch is where providers get creative:
+     *  - answers are matched by id, never by position (a provider may reorder them);
+     *  - an entry the provider silently dropped is a FAILURE of that entry (transient), never an empty success;
+     *  - a transient failure of the whole batch is retried with the same bounded backoff as a single call;
+     *  - a batch REFUSED outright (too large, not supported: a deterministic answer) turns batching off for this client and the
+     *    calls are sent one by one, so a wrong batch size costs speed and never correctness;
+     *  - after a batch, entries that failed transiently are re-requested individually (with request()'s own bounded retries),
+     *    while a revert, a range cap or an auth failure of an entry is kept as that entry's answer.
+     *
+     * @param list<array{0: string, 1: list<mixed>}> $calls [method, params] pairs
+     *
+     * @return list<mixed|EvmRpcError>
+     */
+    public function requestBatch(array $calls): array
+    {
+        if ($this->maxBatchSize <= 1 || count($calls) <= 1) {
+            return array_map(fn (array $call): mixed => $this->request($call[0], $call[1]), $calls);
+        }
+
+        $results = [];
+
+        foreach (array_chunk($calls, $this->maxBatchSize, true) as $chunk) {
+            if ($this->maxBatchSize <= 1) {
+                // batching was switched off by an earlier chunk of this very call
+                foreach ($chunk as $index => $call) {
+                    $results[$index] = $this->request($call[0], $call[1]);
+                }
+
+                continue;
+            }
+
+            if (count($chunk) === 1) {
+                foreach ($chunk as $index => $call) {
+                    $results[$index] = $this->request($call[0], $call[1]);
+                }
+
+                continue;
+            }
+
+            $answers = $this->batchWithRetries($chunk);
+
+            if ($answers instanceof EvmRpcError) {
+                if (! $answers->isTransient()) {
+                    // refused outright: deterministic, stop batching for this client
+                    $this->lastError = $answers;
+                    $this->maxBatchSize = 1;
+                }
+
+                foreach ($chunk as $index => $call) {
+                    $results[$index] = $this->request($call[0], $call[1]);
+                }
+
+                continue;
+            }
+
+            foreach ($chunk as $index => $call) {
+                $answer = $answers[$index];
+
+                if ($answer instanceof EvmRpcError && $answer->isTransient()) {
+                    $answer = $this->request($call[0], $call[1]);
+                }
+
+                $results[$index] = $answer;
+            }
+        }
+
+        ksort($results);
+
+        return array_values($results);
+    }
+
+    /**
+     * @param array<int, array{0: string, 1: list<mixed>}> $chunk
+     *
+     * @return array<int, mixed|EvmRpcError>|EvmRpcError per entry (same keys as $chunk), or the failure of the whole batch
+     */
+    private function batchWithRetries(array $chunk): array|EvmRpcError
+    {
+        $attempt = 0;
+
+        while (true) {
+            $outcome = $this->batchOnce($chunk);
+
+            if (! ($outcome instanceof EvmRpcError) || ! $outcome->isTransient() || $attempt >= $this->maxTransientRetries) {
+                return $outcome;
+            }
+
+            $this->lastError = $outcome;
+            $delay = min(self::MAX_BACKOFF_MS, $this->retryBaseDelayMs * (2 ** $attempt));
+            $attempt++;
+            $this->sleepMs($delay);
+        }
+    }
+
+    /**
+     * @param array<int, array{0: string, 1: list<mixed>}> $chunk
+     *
+     * @return array<int, mixed|EvmRpcError>|EvmRpcError
+     */
+    private function batchOnce(array $chunk): array|EvmRpcError
+    {
+        $payload = [];
+        $idToIndex = [];
+
+        foreach ($chunk as $index => [$method, $params]) {
+            $id = $this->nextRequestId++;
+            $idToIndex[$id] = $index;
+            $payload[] = ['jsonrpc' => '2.0', 'id' => $id, 'method' => $method, 'params' => $params];
+        }
+
+        $transport = $this->transport ?? Closure::fromCallable([$this, 'curlTransport']);
+        $startedAt = microtime(true);
+        $response = $transport($this->rpcUrl, json_encode($payload), $this->timeoutSeconds);
+
+        $stat = self::$stats['batch'] ?? ['calls' => 0, 'errors' => 0, 'seconds' => 0.0];
+        $stat['calls']++;
+        $stat['seconds'] += microtime(true) - $startedAt;
+        self::$stats['batch'] = $stat;
+
+        $body = $response['body'] ?? false;
+        $status = (int) ($response['status'] ?? 0);
+
+        if ($body === false || $body === '') {
+            return EvmRpcError::fromTransportFailure($status, 'empty response body or network failure (HTTP ' . $status . ')');
+        }
+
+        $decoded = json_decode($body, true);
+
+        if (! is_array($decoded)) {
+            return EvmRpcError::fromTransportFailure($status, 'batch response is not JSON (HTTP ' . $status . ')');
+        }
+
+        // A refused batch usually comes back as ONE error object instead of an array of answers.
+        if (array_key_exists('error', $decoded) && $decoded['error'] !== null) {
+            return EvmRpcError::fromJsonRpcError($decoded['error'], $status);
+        }
+
+        if ($status !== 200) {
+            return EvmRpcError::fromTransportFailure($status, 'unexpected HTTP status ' . $status);
+        }
+
+        if ($decoded === [] || array_keys($decoded) !== range(0, count($decoded) - 1)) {
+            return EvmRpcError::fromTransportFailure($status, 'batch response is not a list of answers');
+        }
+
+        $answers = [];
+
+        foreach ($decoded as $entry) {
+            if (! is_array($entry) || ! array_key_exists('id', $entry) || ! isset($idToIndex[$entry['id']])) {
+                continue; // an answer we cannot attribute: ignored, the entry it should have been stays missing below
+            }
+
+            $index = $idToIndex[$entry['id']];
+
+            if (array_key_exists('error', $entry) && $entry['error'] !== null) {
+                $answers[$index] = EvmRpcError::fromJsonRpcError($entry['error'], $status);
+            } elseif (array_key_exists('result', $entry)) {
+                $answers[$index] = $entry['result'];
+            }
+        }
+
+        foreach (array_keys($chunk) as $index) {
+            // A dropped entry is a failure of that entry, never an empty success.
+            $answers[$index] ??= new EvmRpcError(EvmRpcError::KIND_TRANSIENT, 'the batch answer has no usable entry for this call');
+        }
+
+        return $answers;
     }
 
     /**

@@ -201,6 +201,15 @@ blocks were found on one wallet: re-check a listed block the first time another 
   Ethereum and ~900 on Base and Polygon. A provider that accepts large ranges (NodeReal accepted 50,000 on BNB Smart Chain)
   turns the same scans into a few hundred requests. **Configure keyed providers for Ethereum, Base and Polygon before asking
   for an old date**, and run `php bin/check-providers.php` to see what each provider accepts and how long it projects to take.
+- **Every provider must belong to its chain.** At the start of each request the service asks every configured provider for its
+  chain id (`eth_chainId`) and refuses to run (`502`, naming the provider) when it disagrees with the chain it is listed under: a
+  BNB Smart Chain URL pasted under `base` used to answer every read with BSC data, looking perfectly healthy, and an end block of
+  the wrong chain was cached for Base. `bin/check-providers.php` prints each provider's chain id and flags a wrong one.
+- **Batching (optional, per provider).** A provider entry may carry `'batch_size' => N`: how many JSON-RPC calls it accepts in one HTTP
+  request. It is measured by `bin/check-providers.php` (NodeReal accepted 100, about 60 to 95 times faster than the same reads one by
+  one; drpc's free plan accepts at most 3) and defaults to 1 (no batching). The client matches answers by id, treats a dropped
+  entry as a failure of that entry, and falls back to single calls when a batch is refused, so a wrong value costs speed, not
+  correctness. (The state reads of a day use it only where the code says so; see the plan.)
 - **Locks.** One `flock` file per (chain, provider) in `reconstruction.lock_directory` (writable by the web server,
   outside the web root; defaults to a directory under the system temp dir). A second reconstruction that needs a
   lock already held gets a `409` with `Retry-After`. The OS releases a lock if the process dies. This assumes a

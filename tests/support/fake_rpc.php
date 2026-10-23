@@ -17,10 +17,50 @@ use Closure;
  * Every request is appended to $calls (by reference), so tests can assert exactly what was
  * sent, in particular the block parameter of every historical read.
  */
-function fakeTransport(Closure $handler, array &$calls): Closure
+function fakeTransport(Closure $handler, array &$calls, array $batch = []): Closure
 {
-    return static function (string $url, string $payload, int $timeout) use ($handler, &$calls): array {
+    return static function (string $url, string $payload, int $timeout) use ($handler, &$calls, $batch): array {
+        HttpCounter::$requests++;
         $request = json_decode($payload, true);
+
+        // A JSON-RPC BATCH: a list of requests. $batch options: 'maxSize' (refuse larger ones with ONE error object),
+        // 'shuffle' (answer in another order), 'drop' (fn(int $position): bool, silently omit that answer),
+        // 'transient' (fn(int $position): bool, answer that entry with a rate-limit error).
+        if (is_array($request) && $request !== [] && array_keys($request) === range(0, count($request) - 1) && isset($request[0]["method"])) {
+            HttpCounter::$batches++;
+
+            if (isset($batch['maxSize']) && count($request) > $batch['maxSize']) {
+                return ['body' => json_encode(['jsonrpc' => '2.0', 'id' => null, 'error' => ['code' => -32600, 'message' => 'Batch of more than ' . $batch['maxSize'] . ' requests are not allowed']]), 'status' => 200];
+            }
+
+            $answers = [];
+
+            foreach ($request as $position => $entry) {
+                $calls[] = ['method' => $entry['method'], 'params' => $entry['params'], 'url' => $url, 'batch' => count($request)];
+
+                if (isset($batch['drop']) && $batch['drop']($position)) {
+                    continue;
+                }
+
+                if (isset($batch['transient']) && $batch['transient']($position)) {
+                    $answers[] = ['jsonrpc' => '2.0', 'id' => $entry['id'], 'error' => ['code' => -32005, 'message' => 'Too many requests']];
+
+                    continue;
+                }
+
+                $reply = $handler($entry['method'], $entry['params'], $url);
+                $answers[] = array_key_exists('raw', $reply)
+                    ? ['jsonrpc' => '2.0', 'id' => $entry['id'], 'error' => ['code' => -32000, 'message' => 'raw reply in a batch']]
+                    : ['jsonrpc' => '2.0', 'id' => $entry['id']] + $reply;
+            }
+
+            if (! empty($batch['shuffle'])) {
+                $answers = array_reverse($answers);
+            }
+
+            return ['body' => json_encode($answers), 'status' => 200];
+        }
+
         $calls[] = ['method' => $request['method'], 'params' => $request['params'], 'url' => $url];
 
         $reply = $handler($request['method'], $request['params'], $url);
@@ -35,15 +75,29 @@ function fakeTransport(Closure $handler, array &$calls): Closure
     };
 }
 
+/** Counts the HTTP requests the fake transport received (a batch is ONE request). */
+final class HttpCounter
+{
+    public static int $requests = 0;
+
+    public static int $batches = 0;
+
+    public static function reset(): void
+    {
+        self::$requests = 0;
+        self::$batches = 0;
+    }
+}
+
 /**
  * A client factory (fn(string $url): EvmRpcClient) wired to a fake transport, for the
  * Compound / Aave clients' $rpcFactory parameter.
  */
-function fakeFactory(Closure $handler, array &$calls): Closure
+function fakeFactory(Closure $handler, array &$calls, int $maxBatchSize = 1, array $batchOptions = []): Closure
 {
-    $transport = fakeTransport($handler, $calls);
+    $transport = fakeTransport($handler, $calls, $batchOptions);
 
-    return static fn (string $url): EvmRpcClient => new EvmRpcClient($url, $transport);
+    return static fn (string $url): EvmRpcClient => new EvmRpcClient($url, $transport, 15, 0, 500, null, $maxBatchSize);
 }
 
 function word(int|string $value): string

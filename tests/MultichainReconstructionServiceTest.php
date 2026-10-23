@@ -70,6 +70,9 @@ function worldHandler(array $world, ?\Closure $override = null): \Closure
         $blockOf = static fn ($param): int => $param === 'latest' ? $world['head'] : (int) hexdec(substr((string) $param, 2));
 
         switch ($method) {
+            case 'eth_chainId':
+                return isset($world['chainId']) ? ['result' => '0x' . dechex($world['chainId'])] : ['error' => ['code' => -32601, 'message' => 'method not found']];
+
             case 'eth_blockNumber':
             case 'eth_getLogs':
                 return $logs($method, $params);
@@ -632,4 +635,45 @@ test('service: the logger is told what a long walk is doing', function () {
 
     assertTrue(count(array_filter($messages, static fn (string $m): bool => str_contains($m, 'first activity at block 16000'))) === 1, implode(' | ', $messages));
     assertTrue(count(array_filter($messages, static fn (string $m): bool => str_contains($m, '2023-12-31: row written'))) === 1);
+});
+
+test('service: a provider that serves ANOTHER chain is refused before anything is read or cached (a BSC URL under "base")', function () {
+    $wrong = ethereumWorld();
+    $wrong['chainId'] = 56; // a BNB Smart Chain endpoint configured for Ethereum
+
+    $fx = serviceFixture(['ethereum' => $wrong]);
+    $outcome = ($fx->make)()->reconstruct(SVC_WALLET, '2024-01-03');
+
+    assertSame(Outcome::STATUS_PROVIDER_ERROR, $outcome->getStatus());
+    assertTrue(str_contains($outcome->getMessage(), 'chain id 56') && str_contains($outcome->getMessage(), 'chain id 1'), $outcome->getMessage());
+    assertSame([], $fx->blocks->rows, 'no end block was resolved, so none was cached for the wrong chain');
+    assertSame([], $fx->cursors->rows);
+    assertSame([], $fx->cache->rows);
+
+    // the right chain id passes
+    $right = ethereumWorld();
+    $right['chainId'] = 1;
+    $ok = serviceFixture(['ethereum' => $right]);
+    assertTrue(($ok->make)()->reconstruct(SVC_WALLET, '2024-01-01')->isFound());
+});
+
+test('service: only ONE wrong provider among several is enough to refuse the walk', function () {
+    $good = ethereumWorld();
+    $good['chainId'] = 1;
+    $fx = serviceFixture(['ethereum' => $good]);
+
+    $config = new EvmReconstructionConfig(['reconstruction' => ['rpc' => ['ethereum' => [['name' => 'eth-a', 'url' => 'http://ok.fake'], ['name' => 'bsc-oops', 'url' => 'http://wrong.fake']]], 'lock_directory' => $fx->lockDir]]);
+    $wrongWorld = ethereumWorld();
+    $wrongWorld['chainId'] = 56;
+    $factory = static function (string $url) use ($good, $wrongWorld, $fx): EvmRpcClient {
+        $fx->calls[$url] ??= [];
+
+        return new EvmRpcClient($url, fakeTransport(worldHandler($url === 'http://wrong.fake' ? $wrongWorld : $good), $fx->calls[$url]), 15, 0, 1, static function (int $ms): void {});
+    };
+    $service = new MultichainHoldingsReconstructionService($config, $fx->cache, $fx->cursors, $fx->blocks, $fx->unresolved, $factory, ['ethereum'], static fn (): int => SVC_NOW);
+    $outcome = $service->reconstruct(SVC_WALLET, '2024-01-02');
+
+    assertSame(Outcome::STATUS_PROVIDER_ERROR, $outcome->getStatus());
+    assertTrue(str_contains($outcome->getMessage(), 'bsc-oops'), $outcome->getMessage());
+    assertSame([], $fx->cache->rows);
 });

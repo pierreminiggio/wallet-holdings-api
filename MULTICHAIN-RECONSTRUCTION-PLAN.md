@@ -602,3 +602,22 @@ reference value in section 5 has to be re-read.
   are independent). `bin/check-providers.php` now probes it per provider (accepted batch size, speed-up versus sequential reads) because
   support and limits differ by provider and must not be assumed; the code would fall back to sequential reads where a batch is refused or answered
   incompletely.
+
+### Incident: a BNB Smart Chain URL configured under `base` (Oct 22 2026), and the guard it led to
+
+- **What happened.** During the first run of rung 1 after adding a "Base" provider, the log showed `base: looking for the first activity, scanning
+  logs from block 0 to 6600991`. Base had no block 6.6 million in 2021 (its genesis is June 2023): 6,600,991 is BNB Smart Chain's end block for
+  2021-04-15. The Base provider list contained a `bsc-mainnet.nodereal.io` URL, which answered the block-by-date search with BSC data, and the
+  result was cached under `('base', '2021-04-15')` in `evm_block_by_date`. The provider looked healthy: nothing in the data says which chain it
+  serves.
+- **Guard.** `EvmRpcClient::chainId()` and `EvmReconstructionChains::CHAIN_IDS` (1, 8453, 137, 56): the service checks every configured provider
+  of every walked chain at the start of each request, before any block is resolved, and refuses to run (`provider_error`, naming the provider,
+  the chain id it reports and the one expected). Tested with a wrong provider alone and among several (nothing cached, no cursor, no row).
+  `bin/check-providers.php` prints each provider's chain id and flags a wrong one.
+- **Cleanup the user must do** (the wrongly cached rows are not removed by code): delete the `evm_block_by_date` rows of chain `base`, the
+  `multichain_reconstruction_cursor` rows of chain `base` for the wallet, and any `multichain_reconstruction_unresolved_block` rows of chain `base`;
+  then check that no reconstructed row mentions Base before September 2025. See the SQL in the reply to this finding.
+- **JSON-RPC batching, core only.** `EvmRpcClient::requestBatch()`, `ethCallMany()` and `hasCodesAt()` exist and are tested (answers matched by
+  id, a dropped entry retried alone, a refused batch turns batching off, a revert kept as that entry's answer), and a provider entry takes an
+  optional `batch_size`. Measured: NodeReal accepts 100 per request (60 to 95 times faster than sequential reads), drpc's free plan 3.
+  **Not used yet by the Aave, Compound and token reads**: that wiring comes next, with an equivalence test against the sequential path.

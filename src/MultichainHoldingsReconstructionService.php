@@ -151,6 +151,15 @@ class MultichainHoldingsReconstructionService
             $ctx[$chain] = $this->openChain($address, $chain);
         }
 
+        // ---- every configured provider must serve the chain it is configured for ----------------------
+        foreach ($this->chains as $chain) {
+            $problem = $this->verifyChainIds($chain, $ctx[$chain]);
+
+            if ($problem !== null) {
+                return MultichainReconstructionOutcome::providerError($problem, $this->walkedThrough($ctx));
+            }
+        }
+
         // ---- end block of the target date, per chain -------------------------------------------------
         foreach ($this->chains as $chain) {
             $end = $this->resolveEnd($ctx[$chain], $date);
@@ -323,7 +332,7 @@ class MultichainHoldingsReconstructionService
         foreach ($this->config->providers($chain) as $provider) {
             $client = $this->rpcFactory !== null
                 ? ($this->rpcFactory)($provider['url'])
-                : new EvmRpcClient($provider['url'], null, 60, 6, 2000);
+                : new EvmRpcClient($provider['url'], null, 60, 6, 2000, null, $provider['batch_size'] ?? 1);
 
             $walk->clients[] = $client;
             $walk->builders[] = new EvmHoldingsSnapshotBuilder([$chain => $client]);
@@ -355,6 +364,34 @@ class MultichainHoldingsReconstructionService
         );
 
         return $walk;
+    }
+
+    /**
+     * A URL pasted under the wrong chain (a BNB Smart Chain endpoint under "base") answers every read with the wrong chain's
+     * data and looks perfectly healthy: it produced a wrong end block that was cached for Base. So every provider is asked for
+     * its chain id once per request and the walk REFUSES to run when one disagrees. A provider whose chain id cannot be read is
+     * left to the normal failover (the reads that follow fail the same way).
+     */
+    private function verifyChainIds(string $chain, MultichainChainWalk $c): ?string
+    {
+        $expected = EvmReconstructionChains::CHAIN_IDS[$chain];
+
+        foreach ($c->clients as $i => $client) {
+            $reported = $client->chainId();
+
+            if ($reported instanceof EvmRpcError) {
+                continue;
+            }
+
+            if ($reported !== $expected) {
+                $name = $this->config->providers($chain)[$i]['name'] ?? (string) $i;
+
+                return "{$chain}: provider \"{$name}\" reports chain id {$reported} but {$chain} is chain id {$expected}: "
+                    . 'that URL belongs to another chain, fix reconstruction.rpc in config.php';
+            }
+        }
+
+        return null;
     }
 
     /**

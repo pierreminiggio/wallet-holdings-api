@@ -64,8 +64,12 @@ return [
             // ~100 blocks per eth_getLogs (and Ethereum there times out most requests), which makes a multi-year
             // wallet take days to weeks; a provider with a large range (NodeReal measured 50,000 blocks) makes it
             // minutes to hours. Run `php bin/check-providers.php` to measure what yours accept:
+            // Each URL MUST belong to the chain it is listed under: the service asks every provider for its chain id and refuses to
+            // run when one disagrees (a BNB Smart Chain URL pasted under 'base' would otherwise feed BSC data into Base's history).
+            // Optional 'batch_size' (1 to 500, default 1 = no batching): how many JSON-RPC calls the provider accepts in one HTTP
+            // request. MEASURE it with `php bin/check-providers.php` (NodeReal accepted 100, drpc's free plan only 3).
             // 'ethereum' => [
-            //     ['name' => 'nodereal', 'url' => 'https://eth-mainnet.nodereal.io/v1/YOUR_KEY'],
+            //     ['name' => 'nodereal', 'url' => 'https://eth-mainnet.nodereal.io/v1/YOUR_KEY', 'batch_size' => 100],
             //     ['name' => 'drpc', 'url' => 'https://eth.drpc.org']
             // ],
         ],

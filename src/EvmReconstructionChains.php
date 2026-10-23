@@ -34,6 +34,17 @@ final class EvmReconstructionChains
     public const UNSUPPORTED_CHAIN_KEYS = ['avalanche', 'xdai'];
 
     /**
+     * The EIP-155 chain id of each supported chain, checked against what every configured provider reports (eth_chainId), so a
+     * URL pasted under the wrong chain fails loudly instead of feeding another chain's data into the history.
+     */
+    public const CHAIN_IDS = [
+        self::ETHEREUM => 1,
+        self::BASE => 8453,
+        self::POLYGON => 137,
+        self::BSC => 56,
+    ];
+
+    /**
      * First block the log scan covers, per chain (decision 7).
      *
      * Polygon starts at its native-token genesis (80,406,107) by decision (plan item 4): a

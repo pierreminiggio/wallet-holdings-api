@@ -223,11 +223,26 @@ foreach (EvmReconstructionChains::SUPPORTED_CHAINS as $chain) {
             continue;
         }
 
+        // A URL pasted under the wrong chain answers like a healthy provider: check what chain it really serves.
+        $chainId = $client->chainId();
+        $expectedChainId = EvmReconstructionChains::CHAIN_IDS[$chain];
+
+        if ($chainId instanceof EvmRpcError) {
+            echo "      chain id: could not be read ({$chainId})\n";
+        } elseif ($chainId !== $expectedChainId) {
+            echo "      *** WRONG CHAIN: this URL serves chain id {$chainId}, but {$chain} is chain id {$expectedChainId}. Fix config.php. ***\n";
+
+            continue;
+        } else {
+            echo "      chain id {$chainId}: ok\n";
+        }
+
         // 1. the largest accepted range
         $start = SAMPLE_START[$chain];
         $size = 50000;
         $cap = null;
         $attempts = 0;
+        $lastCapError = null;
 
         while ($size >= 1 && $attempts < 14) {
             $attempts++;
@@ -238,6 +253,8 @@ foreach (EvmReconstructionChains::SUPPORTED_CHAINS as $chain) {
 
                 break;
             }
+
+            $lastCapError = $result;
 
             if ($result->isRangeCap()) {
                 $size = intdiv($size, 2);
@@ -255,7 +272,7 @@ foreach (EvmReconstructionChains::SUPPORTED_CHAINS as $chain) {
         }
 
         if ($cap === null) {
-            echo "      could not establish a working range size\n";
+            echo '      could not establish a working range size' . ($lastCapError !== null ? " (last error: {$lastCapError})" : '') . "\n";
 
             continue;
         }

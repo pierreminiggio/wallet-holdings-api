@@ -13,6 +13,9 @@ use InvalidArgumentException;
  * while the reconstruction needs archive access and eth_getLogs, which is chain-specific
  * (MULTICHAIN-HOLDINGS.md, "Per-chain RPC config for reconstruction").
  *
+ * A provider may carry an optional "batch_size": how many JSON-RPC calls it accepts in one HTTP request (default 1 = no
+ * batching). It must be MEASURED, not assumed: bin/check-providers.php probes it (NodeReal accepted 100, drpc's free plan 3).
+ *
  * Like App::DEFAULT_RPC_URLS, DEFAULT_PROVIDERS gives a code-level fallback, so an existing
  * config.php created before this section existed still works for the chains that have a
  * keyless option. Configuring a chain REPLACES its defaults (it does not extend them).
@@ -121,10 +124,16 @@ final class EvmReconstructionConfig
         foreach ($entries as $entry) {
             $name = null;
             $url = $entry;
+            $batchSize = null;
 
             if (is_array($entry)) {
                 $url = $entry['url'] ?? null;
                 $name = $entry['name'] ?? null;
+                $batchSize = $entry['batch_size'] ?? null;
+            }
+
+            if ($batchSize !== null && (! is_int($batchSize) || $batchSize < 1 || $batchSize > 500)) {
+                throw new InvalidArgumentException("config reconstruction.rpc.{$chain}: batch_size must be an integer from 1 to 500");
             }
 
             if (! is_string($url) || preg_match('#^https?://[^\s]+$#i', $url) !== 1) {
@@ -147,7 +156,13 @@ final class EvmReconstructionConfig
             }
 
             $names[$name] = true;
-            $providers[] = ['name' => $name, 'url' => $url];
+            $provider = ['name' => $name, 'url' => $url];
+
+            if ($batchSize !== null && $batchSize > 1) {
+                $provider['batch_size'] = $batchSize;
+            }
+
+            $providers[] = $provider;
         }
 
         return $providers;

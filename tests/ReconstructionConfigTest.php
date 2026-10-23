@@ -125,3 +125,26 @@ test('config: config.example.php is itself a valid configuration', function () {
     assertSame('nodereal', $config->providers('binance-smart-chain')[0]['name']);
     assertSame('drpc', $config->providers('ethereum')[0]['name']);
 });
+
+test('config: batch_size is optional, carried only when above 1, and validated', function () {
+    $config = new EvmReconstructionConfig(['reconstruction' => ['rpc' => [
+        'ethereum' => [['name' => 'nodereal', 'url' => 'https://eth.example/v1/KEY', 'batch_size' => 100], ['name' => 'drpc', 'url' => 'https://eth.drpc.org', 'batch_size' => 1]],
+        'base' => [['name' => 'plain', 'url' => 'https://base.example']],
+    ]]]);
+
+    assertSame(100, $config->providers('ethereum')[0]['batch_size']);
+    assertFalse(array_key_exists('batch_size', $config->providers('ethereum')[1]), 'a size of 1 means no batching: not carried');
+    assertFalse(array_key_exists('batch_size', $config->providers('base')[0]));
+
+    foreach ([0, -3, 501, '10', 2.5] as $bad) {
+        assertThrows(\InvalidArgumentException::class, fn () => new EvmReconstructionConfig(['reconstruction' => ['rpc' => ['ethereum' => [['name' => 'x', 'url' => 'https://x.example', 'batch_size' => $bad]]]]]), json_encode($bad));
+    }
+});
+
+test('chains: chain ids of the four supported chains', function () {
+    assertSame(['ethereum' => 1, 'base' => 8453, 'polygon' => 137, 'binance-smart-chain' => 56], Chains::CHAIN_IDS);
+
+    foreach (Chains::SUPPORTED_CHAINS as $chain) {
+        assertTrue(isset(Chains::CHAIN_IDS[$chain]), $chain);
+    }
+});
