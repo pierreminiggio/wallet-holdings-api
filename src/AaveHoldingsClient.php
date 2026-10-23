@@ -294,14 +294,20 @@ class AaveHoldingsClient
         $walletEnc = AbiCodec::encodeAddress($wallet);
         $reservePositions = [];
 
-        foreach ($reserves as $reserve) {
-            $supplied = $this->tokenBalanceAt($rpc, $reserve['aToken'], $walletEnc, $block);
-            $stableDebt = $this->tokenBalanceAt($rpc, $reserve['stableDebtToken'], $walletEnc, $block);
-            $variableDebt = $this->tokenBalanceAt($rpc, $reserve['variableDebtToken'], $walletEnc, $block);
+        // The reserve list is the chain's CURRENT one, so on an old block most of its aTokens / debt tokens do not exist
+        // yet. Their eth_getCode answers cannot be remembered from one day to the next (a contract absent at block B may
+        // exist at B + 1 day), so a day-by-day walk pays for them every day: read them all in ONE batched round trip, then
+        // read the balances of the deployed ones in another, instead of two sequential calls per token.
+        $balances = $this->tokenBalancesAt($rpc, $reserves, $walletEnc, $block);
 
-            if ($supplied === null || $stableDebt === null || $variableDebt === null) {
-                return EvmRpcClient::ERROR_UPSTREAM;
-            }
+        if (is_string($balances)) {
+            return $balances;
+        }
+
+        foreach ($reserves as $reserve) {
+            $supplied = $balances[strtolower($reserve['aToken'])] ?? '0';
+            $stableDebt = $balances[strtolower($reserve['stableDebtToken'])] ?? '0';
+            $variableDebt = $balances[strtolower($reserve['variableDebtToken'])] ?? '0';
 
             if (AbiCodec::isZero($supplied) && AbiCodec::isZero($stableDebt) && AbiCodec::isZero($variableDebt)) {
                 continue;
@@ -330,39 +336,58 @@ class AaveHoldingsClient
     }
 
     /**
-     * balanceOf($walletEnc) on a token as of $block, as a decimal string; "0" when the
-     * token is the zero address (a reserve with no stable debt token) or does not exist yet
-     * at $block; null on any RPC failure.
+     * balanceOf($walletEnc) as of $block for every aToken / stable debt token / variable debt token of $reserves, as decimal
+     * strings keyed by lower-cased token address. A token that is the zero address (a reserve with no stable debt token) or
+     * does not exist yet at $block (eth_getCode, never an inference from an empty eth_call) has no entry: a verified zero.
+     * Two batched round trips (when the provider allows batching) cover the whole chain.
+     *
+     * @param list<array{aToken: string, stableDebtToken: string, variableDebtToken: string}> $reserves
+     *
+     * @return array<string, string>|string the balances, or ERROR_UPSTREAM on any RPC failure (a partial position would
+     *                                      look complete and be wrong)
      */
-    private function tokenBalanceAt(EvmRpcClient $rpc, string $token, string $walletEnc, int $block): ?string
+    private function tokenBalancesAt(EvmRpcClient $rpc, array $reserves, string $walletEnc, int $block): array|string
     {
-        if (strtolower($token) === self::ZERO_ADDRESS) {
-            return '0';
+        $tokens = [];
+
+        foreach ($reserves as $reserve) {
+            foreach ([$reserve['aToken'], $reserve['stableDebtToken'], $reserve['variableDebtToken']] as $token) {
+                if (strtolower($token) !== self::ZERO_ADDRESS) {
+                    $tokens[strtolower($token)] = true;
+                }
+            }
         }
 
-        $deployed = $rpc->hasCodeAt($token, $block);
+        $deployed = $rpc->hasCodesAt(array_keys($tokens), $block);
 
         if ($deployed instanceof EvmRpcError) {
-            return null;
+            return EvmRpcClient::ERROR_UPSTREAM;
         }
 
-        if (! $deployed) {
-            return '0';
+        $toRead = array_keys(array_filter($deployed));
+        $calls = [];
+
+        foreach ($toRead as $token) {
+            $calls[] = [$token, self::SEL_BALANCE_OF . $walletEnc];
         }
 
-        $raw = $rpc->ethCall($token, self::SEL_BALANCE_OF . $walletEnc, $block);
+        $balances = [];
 
-        if ($raw === EvmRpcClient::ERROR_UPSTREAM) {
-            return null;
+        foreach ($rpc->ethCallMany($calls, $block) as $i => $raw) {
+            if ($raw === EvmRpcClient::ERROR_UPSTREAM) {
+                return EvmRpcClient::ERROR_UPSTREAM;
+            }
+
+            $words = AbiCodec::words($raw);
+
+            if (count($words) !== 1 || strlen($words[0]) !== 64) {
+                return EvmRpcClient::ERROR_UPSTREAM;
+            }
+
+            $balances[$toRead[$i]] = AbiCodec::hexToDec($words[0]);
         }
 
-        $words = AbiCodec::words($raw);
-
-        if (count($words) !== 1 || strlen($words[0]) !== 64) {
-            return null;
-        }
-
-        return AbiCodec::hexToDec($words[0]);
+        return $balances;
     }
 
     /**

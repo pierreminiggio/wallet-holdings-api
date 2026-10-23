@@ -300,3 +300,26 @@ test('Aave historical: reserve tokens are resolved once per client, not once per
     $listCalls = array_filter($calls, static fn (array $c): bool => $c['method'] === 'eth_call' && substr($c['params'][0]['data'], 0, 10) === '0xb316ff89');
     assertSame(1, count($listCalls));
 });
+
+test('Aave historical: with batching, the code checks and the balance reads are batched and the result is unchanged', function () {
+    $calls = [];
+    $plain = aaveClient(aaveHandler(), $calls)->getHoldings(AAVE_WALLET, 100);
+
+    $batchedCalls = [];
+    HttpCounter::reset();
+    $client = new AaveHoldingsClient(['polygon' => 'http://fake-polygon'], fakeFactory(aaveHandler(), $batchedCalls, 100));
+    $batched = $client->getHoldings(AAVE_WALLET, 100);
+
+    assertSame($plain, $batched);
+
+    // one getCode batch (every non-zero token of every reserve) and one balanceOf batch (the deployed ones only)
+    $getCodeBatches = array_filter($batchedCalls, static fn (array $c): bool => $c['method'] === 'eth_getCode' && isset($c['batch']));
+    $balanceBatches = array_filter(
+        $batchedCalls,
+        static fn (array $c): bool => $c['method'] === 'eth_call' && isset($c['batch']) && str_starts_with($c['params'][0]['data'], '0x70a08231')
+    );
+
+    assertTrue(count($getCodeBatches) >= 1, 'the eth_getCode checks went in a batch');
+    assertTrue(count($balanceBatches) >= 1, 'the balanceOf reads went in a batch');
+    assertTrue(HttpCounter::$batches >= 2, 'at least two batched HTTP requests');
+});

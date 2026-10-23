@@ -621,3 +621,16 @@ reference value in section 5 has to be re-read.
   id, a dropped entry retried alone, a refused batch turns batching off, a revert kept as that entry's answer), and a provider entry takes an
   optional `batch_size`. Measured: NodeReal accepts 100 per request (60 to 95 times faster than sequential reads), drpc's free plan 3.
   **Not used yet by the Aave, Compound and token reads**: that wiring comes next, with an equivalence test against the sequential path.
+
+## Measured cost of a walked day (rung 5, 2023-02-01..28, Ethereum + BSC, no batching)
+
+About 160 s per day, ~185 RPC calls: `eth_getCode` ~115 calls / ~105 s, `balanceOf` 22-30 calls / ~20 s,
+`eth_getBlockByNumber` 12-20 calls / ~13 s. The token sets were tiny (Ethereum 1 token, BSC 6): the
+`eth_getCode` calls came from the Aave historical read, which probes every aToken / debt token of the
+chain's CURRENT reserve list, most of which do not exist yet on an old block. An absence cannot be memoised
+from one day to the next, so it is paid every day.
+
+Fix: `AaveHoldingsClient::tokenBalancesAt()` checks all those tokens with one `hasCodesAt()` and reads the
+deployed ones' balances with one `ethCallMany()`. These only gain speed when the provider's `batch_size` is
+set in `config.php` (default 1 = no batching): set it to 100 for NodeReal and Ankr, leave drpc at 1.
+Remaining per-day cost to look at next: the `eth_getBlockByNumber` calls of the day-end block resolution.
